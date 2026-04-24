@@ -17,19 +17,34 @@ VIDEO_EXTENSIONS = {
 }
 
 
-def natural_sort_key(path: Path) -> list:
-    """Sort key that handles embedded numbers correctly (ep2 before ep10)."""
-    parts = re.split(r"(\d+)", path.name.lower())
+def _natural_key(s: str) -> list:
+    parts = re.split(r"(\d+)", s.lower())
     return [int(p) if p.isdigit() else p for p in parts]
 
 
+def natural_sort_key(path: Path) -> list:
+    """Sort key that handles embedded numbers correctly (ep2 before ep10)."""
+    return _natural_key(path.name)
+
+
 def collect_show_files(show_dir: Path) -> list[Path]:
-    """Return sorted list of video files directly inside show_dir."""
+    """Return sorted video files under show_dir, including inside season subdirectories.
+
+    Files are ordered by each path component naturally, so Season 2 comes
+    before Season 10, and episodes within a season stay in broadcast order.
+    """
     files = [
-        f for f in show_dir.iterdir()
+        f for f in show_dir.rglob("*")
         if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
     ]
-    return sorted(files, key=natural_sort_key)
+
+    def path_sort_key(f: Path) -> list:
+        key: list = []
+        for part in f.relative_to(show_dir).parts:
+            key.extend(_natural_key(part))
+        return key
+
+    return sorted(files, key=path_sort_key)
 
 
 def interleave(lists: list[list], repeat: bool = False) -> list:
