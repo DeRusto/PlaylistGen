@@ -8,7 +8,7 @@ import argparse
 import os
 import re
 import sys
-from itertools import zip_longest
+from itertools import cycle, islice, zip_longest
 from pathlib import Path
 
 VIDEO_EXTENSIONS = {
@@ -32,11 +32,22 @@ def collect_show_files(show_dir: Path) -> list[Path]:
     return sorted(files, key=natural_sort_key)
 
 
-def interleave(lists: list[list]) -> list:
+def interleave(lists: list[list], repeat: bool = False) -> list:
     """
-    Round-robin interleave, skipping exhausted lists.
-    [a1,a2,a3], [b1,b2] → [a1,b1,a2,b2,a3]
+    Round-robin interleave across all lists.
+
+    repeat=False: exhausted lists are skipped; longer lists fill the tail.
+      [a1,a2,a3], [b1,b2] → [a1,b1, a2,b2, a3]
+
+    repeat=True: shorter lists cycle back to their first episode.
+      [a1,a2,a3], [b1,b2] → [a1,b1, a2,b2, a3,b1]
     """
+    if not lists:
+        return []
+    if repeat:
+        max_len = max(len(lst) for lst in lists)
+        cycled = [list(islice(cycle(lst), max_len)) for lst in lists]
+        return [item for group in zip(*cycled) for item in group]
     result = []
     for group in zip_longest(*lists):
         for item in group:
@@ -45,7 +56,7 @@ def interleave(lists: list[list]) -> list:
     return result
 
 
-def build_playlist(media_dir: Path, output: Path, relative: bool) -> int:
+def build_playlist(media_dir: Path, output: Path, relative: bool, repeat: bool = False) -> int:
     """Scan media_dir, interleave episodes, write M3U. Returns episode count."""
     show_dirs = sorted(
         [d for d in media_dir.iterdir() if d.is_dir()],
@@ -72,7 +83,7 @@ def build_playlist(media_dir: Path, output: Path, relative: bool) -> int:
     for name, files in shows:
         print(f"  {name}: {len(files)} episode(s)")
 
-    playlist = interleave([files for _, files in shows])
+    playlist = interleave([files for _, files in shows], repeat=repeat)
 
     with output.open("w", encoding="utf-8") as fh:
         fh.write("#EXTM3U\n")
@@ -95,6 +106,7 @@ Examples:
   playlist_gen.py /media/tv
   playlist_gen.py /media/tv -o ~/interleaved.m3u
   playlist_gen.py /media/tv --relative
+  playlist_gen.py /media/tv --repeat
 """,
     )
     parser.add_argument(
@@ -113,6 +125,14 @@ Examples:
         action="store_true",
         help="Write relative paths in the playlist instead of absolute paths",
     )
+    parser.add_argument(
+        "--repeat",
+        action="store_true",
+        help=(
+            "Cycle shorter shows back to episode 1 instead of leaving gaps. "
+            "The playlist length equals (number of shows) × (longest show's episode count)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -123,7 +143,7 @@ Examples:
 
     output: Path = args.output.resolve() if args.output else media_dir / "interleaved.m3u"
 
-    count = build_playlist(media_dir, output, args.relative)
+    count = build_playlist(media_dir, output, args.relative, args.repeat)
     if count:
         print(f"\nPlaylist written to: {output}  ({count} entries)")
     else:
