@@ -104,9 +104,11 @@ def build_playlist(media_dir: Path, output: Path, relative: bool, repeat: bool =
         fh.write("#EXTM3U\n")
         for ep in playlist:
             fh.write(f"#EXTINF:-1,{ep.stem}\n")
-            path_str = (
-                os.path.relpath(ep, output.parent) if relative else str(ep.resolve())
-            )
+            if relative:
+                path_str = os.path.normpath(os.path.relpath(ep, output.parent))
+            else:
+                # normpath cleans any accidental ./ without following symlinks
+                path_str = os.path.normpath(ep)
             fh.write(path_str + "\n")
 
     return len(playlist)
