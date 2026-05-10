@@ -36,8 +36,8 @@ python playlist_gen.py <media_dir> [options]
 | `-o`, `--output` | Output file path (default: `<first media_dir>/interleaved.m3u`) |
 | `--relative` | Write relative paths instead of absolute paths |
 | `--repeat` | Cycle shorter shows back to episode 1 instead of leaving gaps |
-| `--shuffle` | `episodes` or `seasons` (see Shuffle modes below) |
-| `--shuffle-n N` | Block size for `--shuffle episodes` (default: 10) |
+| `--interleave` | `episodes` or `seasons` (see Interleave modes below) |
+| `--block-size N` | Episodes per show per round for `--interleave episodes` (default: 10) |
 
 ### CLI Examples
 
@@ -54,11 +54,11 @@ python playlist_gen.py /media/tv --relative
 # Repeat shorter shows so every slot is filled
 python playlist_gen.py /media/tv --repeat
 
-# Shuffle in blocks of 5 episodes
-python playlist_gen.py /media/tv --shuffle episodes --shuffle-n 5
+# Watch 5 episodes of each show before switching
+python playlist_gen.py /media/tv --interleave episodes --block-size 5
 
-# Pool and shuffle within each season
-python playlist_gen.py /media/tv --shuffle seasons
+# Watch one full season of each show before switching
+python playlist_gen.py /media/tv --interleave seasons
 ```
 
 ---
@@ -82,7 +82,7 @@ Settings:
   Path style  : absolute
   Repeat      : off
   Show order  : alphabetical
-  Shuffle     : none (ordered round-robin)
+  Mode        : 1 episode per show
 
 Commands:
   [a] Add source directory
@@ -93,7 +93,7 @@ Commands:
   [p] Toggle path style  (absolute / relative)
   [r] Toggle repeat shorter shows
   [n] Toggle show order  (alphabetical / random)
-  [s] Configure shuffle
+  [s] Set interleave mode
   [g] Generate playlist
   [q] Quit
 ```
@@ -110,7 +110,7 @@ Commands:
 | `p` | Toggle between absolute and relative paths |
 | `r` | Toggle repeat mode (cycle shorter shows) |
 | `n` | Toggle show order (alphabetical / random) |
-| `s` | Configure shuffle mode |
+| `s` | Set interleave mode |
 | `g` | Generate the playlist |
 | `q` | Quit |
 
@@ -225,17 +225,24 @@ ShowB (2 eps):  b1 b2
 
 ---
 
-## Shuffle modes
+## Interleave modes
 
-Configured via `--shuffle` (CLI) or `[s]` (interactive menu).
+The interleave mode controls how many episodes of each show play before the next show takes its turn. Configured via `--interleave` (CLI) or `[s]` (interactive menu).
 
-### None (default)
+### Default — 1 episode per show
 
-Episodes play in broadcast order, interleaved round-robin.
+One episode from each show per round, strict round-robin. This is the default and requires no flag.
 
-### Episodes (`--shuffle episodes`)
+```
+ShowA:  a1 a2 a3 a4 a5
+ShowB:  b1 b2 b3
 
-Watch N consecutive episodes of each show (in broadcast order) before switching to the next. The round-robin cycle repeats with the next block of N episodes from each show.
+→  a1 b1  a2 b2  a3 b3  a4  a5
+```
+
+### Episodes (`--interleave episodes`)
+
+N consecutive episodes of each show (in broadcast order) before switching to the next. The cycle repeats with the next block of N episodes from each show.
 
 ```
 ShowA:  a1 a2 a3 a4 a5
@@ -243,11 +250,19 @@ ShowB:  b1 b2 b3
 N = 2 → a1 a2  b1 b2  a3 a4  b3  a5
 ```
 
-Set the block size with `--shuffle-n N` (default 10). Episodes always play in their natural order — no randomisation.
+Set N with `--block-size N` (default 10). Episodes always play in broadcast order.
 
-### Seasons (`--shuffle seasons`)
+### Seasons (`--interleave seasons`)
 
-Episodes from the same season across all shows are pooled and shuffled together before moving to the next season. Seasons are processed in order (Season 1 of all shows, then Season 2, etc.).
+One complete season of each show (in broadcast order) before switching to the next show. After all shows have played their current season, the cycle moves to the next season.
+
+```
+ShowA: S1=[a01 a02]  S2=[a03]
+ShowB: S1=[b01]      S2=[b02 b03]
+
+→  a01 a02 b01  (Season 1 of all shows)
+   a03 b02 b03  (Season 2 of all shows)
+```
 
 When `--repeat` is on and a show runs out of seasons, its earlier seasons are cycled back in.
 

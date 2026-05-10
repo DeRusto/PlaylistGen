@@ -325,37 +325,32 @@ def test_interleave_in_blocks_empty():
 # ---------------------------------------------------------------------------
 
 def test_interleave_by_season_total_count():
+    # ShowA: 2 seasons; ShowB: 2 seasons — broadcast order, no pooling
     sa = [[Path("a01.mkv"), Path("a02.mkv")], [Path("a03.mkv")]]
     sb = [[Path("b01.mkv")], [Path("b02.mkv"), Path("b03.mkv")]]
-    random.seed(0)
     result = interleave_by_season([sa, sb])
-    assert len(result) == 6
-    assert set(result) == {
-        Path("a01.mkv"), Path("a02.mkv"), Path("a03.mkv"),
-        Path("b01.mkv"), Path("b02.mkv"), Path("b03.mkv"),
-    }
+    # Round 0: sa S1 a01,a02 then sb S1 b01
+    # Round 1: sa S2 a03 then sb S2 b02,b03
+    assert result == [
+        Path("a01.mkv"), Path("a02.mkv"), Path("b01.mkv"),
+        Path("a03.mkv"), Path("b02.mkv"), Path("b03.mkv"),
+    ]
 
 
 def test_interleave_by_season_shorter_show_skipped():
     sa = [[Path("a01.mkv")], [Path("a02.mkv")]]  # 2 seasons
     sb = [[Path("b01.mkv")]]                       # 1 season
-    random.seed(0)
     result = interleave_by_season([sa, sb])
-    # Season 1: a01 + b01; Season 2: a02 only
-    assert len(result) == 3
-    assert Path("a01.mkv") in result
-    assert Path("b01.mkv") in result
-    assert Path("a02.mkv") in result
+    # Round 0: a01, b01; Round 1: a02 (sb has no season 2)
+    assert result == [Path("a01.mkv"), Path("b01.mkv"), Path("a02.mkv")]
 
 
 def test_interleave_by_season_repeat():
     sa = [[Path("a01.mkv")], [Path("a02.mkv")]]  # 2 seasons
     sb = [[Path("b01.mkv")]]                       # 1 season — cycles
-    random.seed(0)
     result = interleave_by_season([sa, sb], repeat=True)
-    # Season 1: a01 + b01; Season 2: a02 + b01 (cycled)
-    assert len(result) == 4
-    assert result.count(Path("b01.mkv")) == 2
+    # Round 0: a01, b01; Round 1: a02, b01 (sb S1 cycled)
+    assert result == [Path("a01.mkv"), Path("b01.mkv"), Path("a02.mkv"), Path("b01.mkv")]
 
 
 def test_interleave_by_season_empty():
@@ -498,7 +493,7 @@ def test_build_shuffle_episodes_block_order(tmp_path):
         "ShowB": [f"b{i:02d}.mkv" for i in range(1, 4)],   # b01–b03
     })
     out = tmp_path / "out.m3u"
-    count = build_playlist([tmp_path], out, relative=False, shuffle_mode="episodes", shuffle_n=2)
+    count = build_playlist([tmp_path], out, relative=False, interleave_mode="episodes", block_size=2)
 
     assert count == 8
     names = [Path(p).name for p in _read_playlist_paths(out)]
@@ -507,19 +502,22 @@ def test_build_shuffle_episodes_block_order(tmp_path):
                      "a03.mkv", "a04.mkv", "b03.mkv", "a05.mkv"]
 
 
-def test_build_shuffle_seasons_preserves_count(tmp_path):
+def test_build_interleave_seasons_order(tmp_path):
     show_a = tmp_path / "ShowA"
     show_b = tmp_path / "ShowB"
     _make_season_tree(show_a, {"Season 1": ["s01e01.mkv", "s01e02.mkv"], "Season 2": ["s02e01.mkv"]})
     _make_season_tree(show_b, {"Season 1": ["b01e01.mkv"], "Season 2": ["b02e01.mkv", "b02e02.mkv"]})
 
     out = tmp_path / "out.m3u"
-    random.seed(42)
-    count = build_playlist([tmp_path], out, relative=False, shuffle_mode="seasons")
+    count = build_playlist([tmp_path], out, relative=False, interleave_mode="seasons")
 
     assert count == 6
-    paths = _read_playlist_paths(out)
-    assert len(set(paths)) == 6  # no duplicates
+    names = [Path(p).name for p in _read_playlist_paths(out)]
+    # Round 0: ShowA S1 then ShowB S1; Round 1: ShowA S2 then ShowB S2
+    assert names == [
+        "s01e01.mkv", "s01e02.mkv", "b01e01.mkv",
+        "s02e01.mkv", "b02e01.mkv", "b02e02.mkv",
+    ]
 
 
 def test_build_include_excludes_shows(tmp_path):
@@ -555,12 +553,12 @@ def test_m3u_header(tmp_path):
 # Regression / edge case tests
 # ---------------------------------------------------------------------------
 
-def test_cli_shuffle_n_zero_produces_error(tmp_path):
-    """--shuffle-n 0 must fail with a clear argparse error, not a crash."""
+def test_cli_block_size_zero_produces_error(tmp_path):
+    """--block-size 0 must fail with a clear argparse error, not a crash."""
     _make_tree(tmp_path, {"ShowA": ["ep1.mkv"]})
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "playlist_gen.py"),
-         str(tmp_path), "--shuffle", "episodes", "--shuffle-n", "0"],
+         str(tmp_path), "--interleave", "episodes", "--block-size", "0"],
         capture_output=True, text=True,
     )
     assert result.returncode != 0
@@ -686,7 +684,7 @@ def test_build_playlist_group_seasons_mode(tmp_path):
     # Group [ShowB, ShowC]: 3 season groups; ShowA: 2 seasons → interleave_by_season
     count = build_playlist(
         [tmp_path], out, relative=False,
-        shuffle_mode="seasons",
+        interleave_mode="seasons",
         groups=[["ShowB", "ShowC"]],
     )
     assert count == 6

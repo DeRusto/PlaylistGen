@@ -170,10 +170,10 @@ def interleave_in_blocks(lists: list[list], block_size: int, repeat: bool = Fals
 def interleave_by_season(
     show_seasons: list[list[list[Path]]], repeat: bool = False
 ) -> list[Path]:
-    """Interleave shows season-by-season.
+    """Interleave shows season-by-season in broadcast order.
 
-    All episodes from season N across every show are pooled and shuffled
-    together before moving on to season N+1.
+    For each season round, all episodes of each show's current season are appended
+    in show order (no pooling, no randomisation), then the next season round begins.
 
     show_seasons: list of shows; each show is a list of season-episode lists.
     """
@@ -182,14 +182,11 @@ def interleave_by_season(
     max_seasons = max(len(s) for s in show_seasons)
     result: list[Path] = []
     for idx in range(max_seasons):
-        pool: list[Path] = []
         for seasons in show_seasons:
             if repeat:
-                pool.extend(seasons[idx % len(seasons)])
+                result.extend(seasons[idx % len(seasons)])
             elif idx < len(seasons):
-                pool.extend(seasons[idx])
-        random.shuffle(pool)
-        result.extend(pool)
+                result.extend(seasons[idx])
     return result
 
 
@@ -272,19 +269,19 @@ def build_playlist(
     output: Path,
     relative: bool,
     repeat: bool = False,
-    shuffle_mode: str = "none",
-    shuffle_n: int = 10,
+    interleave_mode: str = "none",
+    block_size: int = 10,
     include: set[str] | None = None,
     groups: list[list[str]] | None = None,
     show_order: str = "alpha",
 ) -> int:
-    """Scan dirs for shows, interleave/shuffle episodes, write M3U. Returns episode count.
+    """Scan dirs for shows, interleave episodes, write M3U. Returns episode count.
 
-    shuffle_mode: "none" | "episodes" | "seasons"
-    shuffle_n:   block size used when shuffle_mode == "episodes"
-    include:     when set, only shows whose label is in this set are used
-    groups:      each element is an ordered list of show labels to treat as one round-robin slot
-    show_order:  "alpha" (default) | "random" — controls slot order and within-group order
+    interleave_mode: "none" (1 ep/show) | "episodes" (N eps/show) | "seasons" (1 season/show)
+    block_size:      episodes per show per round when interleave_mode == "episodes"
+    include:         when set, only shows whose label is in this set are used
+    groups:          each element is an ordered list of show labels to treat as one round-robin slot
+    show_order:      "alpha" (default) | "random" — controls slot order and within-group order
     """
     if not dirs:
         print("No directories specified.", file=sys.stderr)
@@ -327,7 +324,7 @@ def build_playlist(
                     g_labels = list(g_labels)
                     random.shuffle(g_labels)
                 g_name = f"Group {g_idx + 1} ({', '.join(effective_groups[g_idx])})"
-                if shuffle_mode == "seasons":
+                if interleave_mode == "seasons":
                     g_seasons = _collect_group_seasons(g_labels, label_to_path)
                     if g_seasons:
                         season_slots.append((g_name, g_seasons))
@@ -340,7 +337,7 @@ def build_playlist(
                     else:
                         print(f"  Skipping '{g_name}' — no video files found", file=sys.stderr)
         else:
-            if shuffle_mode == "seasons":
+            if interleave_mode == "seasons":
                 seasons = collect_show_seasons(d)
                 if seasons:
                     season_slots.append((label, seasons))
@@ -353,7 +350,7 @@ def build_playlist(
                 else:
                     print(f"  Skipping '{label}' — no video files found", file=sys.stderr)
 
-    if shuffle_mode == "seasons":
+    if interleave_mode == "seasons":
         if not season_slots:
             print("No video files found.", file=sys.stderr)
             return 0
@@ -369,8 +366,8 @@ def build_playlist(
         print(f"Found {len(flat_slots)} slot(s):")
         for name, files in flat_slots:
             print(f"  {name}: {len(files)} episode(s)")
-        if shuffle_mode == "episodes":
-            playlist = interleave_in_blocks([files for _, files in flat_slots], shuffle_n, repeat=repeat)
+        if interleave_mode == "episodes":
+            playlist = interleave_in_blocks([files for _, files in flat_slots], block_size, repeat=repeat)
         else:
             playlist = interleave([files for _, files in flat_slots], repeat=repeat)
 
@@ -395,10 +392,10 @@ def build_playlist(
 # Interactive menu
 # ---------------------------------------------------------------------------
 
-_SHUFFLE_LABELS = {
-    "none":     "none (ordered round-robin)",
-    "episodes": "per {n} episodes",
-    "seasons":  "per season",
+_MODE_LABELS = {
+    "none":     "1 episode per show",
+    "episodes": "{n} episodes per show",
+    "seasons":  "1 season per show",
 }
 
 
@@ -411,8 +408,8 @@ def _print_menu(
     output: Path | None,
     relative: bool,
     repeat: bool,
-    shuffle_mode: str,
-    shuffle_n: int,
+    interleave_mode: str,
+    block_size: int,
     show_info: list[ShowInfo],
     selected: set[str],
     groups: list[list[str]],
@@ -432,7 +429,7 @@ def _print_menu(
     print()
 
     out_str = str(output) if output else "(auto: interleaved.m3u in first source dir)"
-    shuffle_str = _SHUFFLE_LABELS[shuffle_mode].format(n=shuffle_n)
+    mode_str = _MODE_LABELS[interleave_mode].format(n=block_size)
     n_total = len(show_info)
     n_sel = sum(1 for label, *_ in show_info if label in selected)
     if n_total:
@@ -453,7 +450,7 @@ def _print_menu(
     print(f"  Path style  : {'relative' if relative else 'absolute'}")
     print(f"  Repeat      : {'on' if repeat else 'off'}")
     print(f"  Show order  : {order_str}")
-    print(f"  Shuffle     : {shuffle_str}")
+    print(f"  Mode        : {mode_str}")
     print()
     print("Commands:")
     print("  [a] Add source directory")
@@ -466,28 +463,28 @@ def _print_menu(
     print("  [p] Toggle path style  (absolute / relative)")
     print("  [r] Toggle repeat shorter shows")
     print("  [n] Toggle show order  (alphabetical / random)")
-    print("  [s] Configure shuffle")
+    print("  [s] Set interleave mode")
     if dirs and selected:
         print("  [g] Generate playlist")
     print("  [q] Quit")
     print()
 
 
-def _shuffle_submenu(current_mode: str, current_n: int) -> tuple[str, int]:
+def _mode_submenu(current_mode: str, current_n: int) -> tuple[str, int]:
     _clear()
     print("─" * 54)
-    print("  Shuffle mode")
+    print("  Interleave mode")
     print("─" * 54)
-    print("  [1] None           ordered round-robin, no randomness")
-    print("  [2] Per X episodes watch X episodes per show before switching")
-    print("  [3] Per season     pool + shuffle episodes within each season")
-    print("  [b] Back           keep current setting")
+    print("  [1] Default (1 ep)  1 episode per show, round-robin")
+    print("  [2] Block (N eps)   N consecutive episodes per show before switching")
+    print("  [3] Season          1 full season per show before switching")
+    print("  [b] Back            keep current setting")
     print()
     choice = input("Choice: ").strip().lower()
     if choice == "1":
         return "none", current_n
     if choice == "2":
-        raw = input(f"Block size (episodes per block) [{current_n}]: ").strip()
+        raw = input(f"Episodes per show per round [{current_n}]: ").strip()
         n = int(raw) if raw.isdigit() and int(raw) > 0 else current_n
         return "episodes", n
     if choice == "3":
@@ -664,8 +661,8 @@ def interactive_mode() -> None:
     output: Path | None = None
     relative = False
     repeat = False
-    shuffle_mode = "none"
-    shuffle_n = 10
+    interleave_mode = "none"
+    block_size = 10
     show_order = "alpha"
     show_info: list[ShowInfo] = []
     selected: set[str] = set()
@@ -686,7 +683,7 @@ def interactive_mode() -> None:
         groups = [g for g in groups if g]
 
     while True:
-        _print_menu(dirs, output, relative, repeat, shuffle_mode, shuffle_n, show_info, selected, groups, show_order)
+        _print_menu(dirs, output, relative, repeat, interleave_mode, block_size, show_info, selected, groups, show_order)
         raw_choice = input("Choice: ").strip()
         choice = raw_choice.lower()
 
@@ -740,7 +737,7 @@ def interactive_mode() -> None:
             show_order = "random" if show_order == "alpha" else "alpha"
 
         elif choice == "s":
-            shuffle_mode, shuffle_n = _shuffle_submenu(shuffle_mode, shuffle_n)
+            interleave_mode, block_size = _mode_submenu(interleave_mode, block_size)
 
         elif choice == "g" and dirs and selected:
             out = output or (dirs[0] / "interleaved.m3u")
@@ -748,7 +745,7 @@ def interactive_mode() -> None:
             print()
             try:
                 count = build_playlist(
-                    dirs, out, relative, repeat, shuffle_mode, shuffle_n,
+                    dirs, out, relative, repeat, interleave_mode, block_size,
                     include=include, groups=groups, show_order=show_order,
                 )
             except Exception as e:
@@ -787,8 +784,8 @@ def main() -> None:
 Examples:
   playlist_gen.py /media/tv
   playlist_gen.py /media/tv1 /media/tv2 -o ~/combined.m3u
-  playlist_gen.py /media/tv --shuffle episodes --shuffle-n 5
-  playlist_gen.py /media/tv --shuffle seasons
+  playlist_gen.py /media/tv --interleave episodes --block-size 5
+  playlist_gen.py /media/tv --interleave seasons
   playlist_gen.py /media/tv --relative --repeat
 """,
     )
@@ -819,21 +816,21 @@ Examples:
         ),
     )
     parser.add_argument(
-        "--shuffle",
+        "--interleave",
         choices=["none", "episodes", "seasons"],
         default="none",
-        dest="shuffle_mode",
+        dest="interleave_mode",
         help=(
-            "'episodes': shuffle in blocks of --shuffle-n; "
-            "'seasons': pool and shuffle within each season phase."
+            "'episodes': N consecutive episodes per show (set N with --block-size); "
+            "'seasons': one full season per show before switching."
         ),
     )
     parser.add_argument(
-        "--shuffle-n",
+        "--block-size",
         type=_positive_int,
         default=None,
         metavar="N",
-        help="Block size for --shuffle episodes (default: 10)",
+        help="Episodes per show per round for --interleave episodes (default: 10)",
     )
 
     args = parser.parse_args()
@@ -844,17 +841,17 @@ Examples:
             print(f"Error: '{d}' is not a directory.", file=sys.stderr)
             sys.exit(1)
 
-    if args.shuffle_n is not None and args.shuffle_mode != "episodes":
+    if args.block_size is not None and args.interleave_mode != "episodes":
         print(
-            f"Warning: --shuffle-n has no effect when --shuffle is '{args.shuffle_mode}'.",
+            f"Warning: --block-size has no effect when --interleave is '{args.interleave_mode}'.",
             file=sys.stderr,
         )
-    shuffle_n = args.shuffle_n if args.shuffle_n is not None else 10
+    block_size = args.block_size if args.block_size is not None else 10
 
     output = args.output.resolve() if args.output else dirs[0] / "interleaved.m3u"
 
     count = build_playlist(
-        dirs, output, args.relative, args.repeat, args.shuffle_mode, shuffle_n
+        dirs, output, args.relative, args.repeat, args.interleave_mode, block_size
     )
     if count:
         print(f"\nPlaylist written to: {output}  ({count} entries)")
