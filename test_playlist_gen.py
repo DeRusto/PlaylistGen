@@ -11,6 +11,8 @@ import pytest
 from playlist_gen import (
     _natural_key,
     _scan_dirs,
+    _collect_group_episodes,
+    _collect_group_seasons,
     natural_sort_key,
     collect_show_files,
     collect_show_seasons,
@@ -568,3 +570,112 @@ def test_build_playlist_missing_output_dir_returns_zero(tmp_path, capsys):
     assert count == 0
     captured = capsys.readouterr()
     assert "error" in (captured.err + captured.out).lower()
+
+
+# ---------------------------------------------------------------------------
+# Show grouping
+# ---------------------------------------------------------------------------
+
+def test_collect_group_episodes_sequential(tmp_path):
+    """Episodes from grouped shows are concatenated in order: all of ShowB then all of ShowC."""
+    show_b = tmp_path / "ShowB"
+    show_b.mkdir()
+    (show_b / "b01.mkv").write_text("")
+    (show_b / "b02.mkv").write_text("")
+
+    show_c = tmp_path / "ShowC"
+    show_c.mkdir()
+    (show_c / "c01.mkv").write_text("")
+
+    label_to_path = {"ShowB": show_b, "ShowC": show_c}
+    result = _collect_group_episodes(["ShowB", "ShowC"], label_to_path)
+    names = [f.name for f in result]
+    assert names == ["b01.mkv", "b02.mkv", "c01.mkv"]
+
+
+def test_collect_group_seasons_sequential(tmp_path):
+    """Season groups from all shows in a group are concatenated in show order."""
+    show_b = tmp_path / "ShowB"
+    _make_season_tree(show_b, {"Season 1": ["b01.mkv", "b02.mkv"]})
+
+    show_c = tmp_path / "ShowC"
+    _make_season_tree(show_c, {
+        "Season 1": ["c01.mkv"],
+        "Season 2": ["c02.mkv"],
+    })
+
+    label_to_path = {"ShowB": show_b, "ShowC": show_c}
+    result = _collect_group_seasons(["ShowB", "ShowC"], label_to_path)
+    # ShowB: 1 season group, ShowC: 2 season groups → total 3
+    assert len(result) == 3
+    assert [f.name for f in result[0]] == ["b01.mkv", "b02.mkv"]
+    assert [f.name for f in result[1]] == ["c01.mkv"]
+    assert [f.name for f in result[2]] == ["c02.mkv"]
+
+
+def test_build_playlist_group_acts_as_single_slot(tmp_path):
+    """Grouped shows act as one round-robin slot: ShowA vs Group[ShowB, ShowC]."""
+    _make_tree(tmp_path, {
+        "ShowA": ["a01.mkv", "a02.mkv", "a03.mkv"],
+        "ShowB": ["b01.mkv", "b02.mkv"],
+        "ShowC": ["c01.mkv"],
+    })
+    out = tmp_path / "out.m3u"
+    # Group ShowB + ShowC together → 2-way round-robin: ShowA vs [B1, B2, C1]
+    count = build_playlist([tmp_path], out, relative=False, groups=[["ShowB", "ShowC"]])
+
+    assert count == 6
+    names = [Path(p).name for p in _read_playlist_paths(out)]
+    # Expected: a01,b01, a02,b02, a03,c01
+    assert names == ["a01.mkv", "b01.mkv", "a02.mkv", "b02.mkv", "a03.mkv", "c01.mkv"]
+    # ShowB must fully precede ShowC in the group slot
+    b_indices = [i for i, n in enumerate(names) if n.startswith("b")]
+    c_indices = [i for i, n in enumerate(names) if n.startswith("c")]
+    assert max(b_indices) < min(c_indices)
+
+
+def test_build_playlist_group_seasons_mode(tmp_path):
+    """In season mode, a group's seasons = all member shows' seasons concatenated."""
+    show_a = tmp_path / "ShowA"
+    _make_season_tree(show_a, {"Season 1": ["a01.mkv", "a02.mkv"], "Season 2": ["a03.mkv"]})
+
+    show_b = tmp_path / "ShowB"
+    _make_season_tree(show_b, {"Season 1": ["b01.mkv"]})
+
+    show_c = tmp_path / "ShowC"
+    _make_season_tree(show_c, {"Season 1": ["c01.mkv"], "Season 2": ["c02.mkv"]})
+
+    out = tmp_path / "out.m3u"
+    import random
+    random.seed(42)
+    # Group [ShowB, ShowC]: 3 season groups; ShowA: 2 seasons → interleave_by_season
+    count = build_playlist(
+        [tmp_path], out, relative=False,
+        shuffle_mode="seasons",
+        groups=[["ShowB", "ShowC"]],
+    )
+    assert count == 6
+    names = set(Path(p).name for p in _read_playlist_paths(out))
+    assert names == {"a01.mkv", "a02.mkv", "a03.mkv", "b01.mkv", "c01.mkv", "c02.mkv"}
+
+
+def test_build_playlist_group_with_repeat(tmp_path):
+    """repeat=True cycles the group slot like any other show slot."""
+    _make_tree(tmp_path, {
+        "ShowA": ["a01.mkv", "a02.mkv", "a03.mkv", "a04.mkv"],
+        "ShowB": ["b01.mkv"],
+        "ShowC": ["c01.mkv"],
+    })
+    out = tmp_path / "out.m3u"
+    # Group [ShowB, ShowC] = 2 eps; ShowA = 4 eps; repeat cycles group
+    count = build_playlist(
+        [tmp_path], out, relative=False,
+        repeat=True,
+        groups=[["ShowB", "ShowC"]],
+    )
+    assert count == 8  # 4 × 2 slots
+    names = [Path(p).name for p in _read_playlist_paths(out)]
+    a_names = [n for n in names if n.startswith("a")]
+    g_names = [n for n in names if not n.startswith("a")]
+    assert a_names == ["a01.mkv", "a02.mkv", "a03.mkv", "a04.mkv"]
+    assert len(g_names) == 4  # group slot repeated 4 times

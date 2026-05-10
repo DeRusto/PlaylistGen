@@ -220,6 +220,24 @@ def _refresh_shows(dirs: list[Path]) -> list[ShowInfo]:
 # Playlist builder
 # ---------------------------------------------------------------------------
 
+def _collect_group_episodes(group_labels: list[str], label_to_path: dict[str, Path]) -> list[Path]:
+    """Concatenate episodes from grouped shows sequentially."""
+    result: list[Path] = []
+    for label in group_labels:
+        if label in label_to_path:
+            result.extend(collect_show_files(label_to_path[label]))
+    return result
+
+
+def _collect_group_seasons(group_labels: list[str], label_to_path: dict[str, Path]) -> list[list[Path]]:
+    """Concatenate all season groups from grouped shows sequentially."""
+    result: list[list[Path]] = []
+    for label in group_labels:
+        if label in label_to_path:
+            result.extend(collect_show_seasons(label_to_path[label]))
+    return result
+
+
 def build_playlist(
     dirs: list[Path],
     output: Path,
@@ -228,12 +246,14 @@ def build_playlist(
     shuffle_mode: str = "none",
     shuffle_n: int = 10,
     include: set[str] | None = None,
+    groups: list[list[str]] | None = None,
 ) -> int:
     """Scan dirs for shows, interleave/shuffle episodes, write M3U. Returns episode count.
 
     shuffle_mode: "none" | "episodes" | "seasons"
     shuffle_n:   block size used when shuffle_mode == "episodes"
     include:     when set, only shows whose label is in this set are used
+    groups:      each element is an ordered list of show labels to treat as one round-robin slot
     """
     if not dirs:
         print("No directories specified.", file=sys.stderr)
@@ -247,44 +267,71 @@ def build_playlist(
         print("No show subdirectories found.", file=sys.stderr)
         return 0
 
-    if shuffle_mode == "seasons":
-        named: list[tuple[str, list[list[Path]]]] = []
-        for label, d in show_entries:
-            seasons = collect_show_seasons(d)
-            if seasons:
-                named.append((label, seasons))
-            else:
-                print(f"  Skipping '{label}' — no video files found", file=sys.stderr)
+    effective_groups = groups or []
+    label_to_path = {label: d for label, d in show_entries}
 
-        if not named:
+    # Map each label → index of its group (first occurrence wins)
+    label_to_group: dict[str, int] = {}
+    for g_idx, g in enumerate(effective_groups):
+        for lbl in g:
+            if lbl in label_to_path and lbl not in label_to_group:
+                label_to_group[lbl] = g_idx
+
+    # Walk show_entries in scan order; insert each group at its first member's position
+    placed_groups: set[int] = set()
+    flat_slots: list[tuple[str, list[Path]]] = []
+    season_slots: list[tuple[str, list[list[Path]]]] = []
+
+    for label, d in show_entries:
+        if label in label_to_group:
+            g_idx = label_to_group[label]
+            if g_idx not in placed_groups:
+                placed_groups.add(g_idx)
+                g_labels = effective_groups[g_idx]
+                g_name = f"Group {g_idx + 1} ({', '.join(g_labels)})"
+                if shuffle_mode == "seasons":
+                    g_seasons = _collect_group_seasons(g_labels, label_to_path)
+                    if g_seasons:
+                        season_slots.append((g_name, g_seasons))
+                    else:
+                        print(f"  Skipping '{g_name}' — no video files found", file=sys.stderr)
+                else:
+                    g_eps = _collect_group_episodes(g_labels, label_to_path)
+                    if g_eps:
+                        flat_slots.append((g_name, g_eps))
+                    else:
+                        print(f"  Skipping '{g_name}' — no video files found", file=sys.stderr)
+        else:
+            if shuffle_mode == "seasons":
+                seasons = collect_show_seasons(d)
+                if seasons:
+                    season_slots.append((label, seasons))
+                else:
+                    print(f"  Skipping '{label}' — no video files found", file=sys.stderr)
+            else:
+                eps = collect_show_files(d)
+                if eps:
+                    flat_slots.append((label, eps))
+                else:
+                    print(f"  Skipping '{label}' — no video files found", file=sys.stderr)
+
+    if shuffle_mode == "seasons":
+        if not season_slots:
             print("No video files found.", file=sys.stderr)
             return 0
-
-        print(f"Found {len(named)} show(s):")
-        for name, seasons in named:
+        print(f"Found {len(season_slots)} slot(s):")
+        for name, seasons in season_slots:
             total = sum(len(s) for s in seasons)
             print(f"  {name}: {total} episode(s) in {len(seasons)} season group(s)")
-
-        playlist = interleave_by_season([s for _, s in named], repeat=repeat)
-
+        playlist = interleave_by_season([s for _, s in season_slots], repeat=repeat)
     else:
-        shows: list[tuple[str, list[Path]]] = []
-        for label, d in show_entries:
-            files = collect_show_files(d)
-            if files:
-                shows.append((label, files))
-            else:
-                print(f"  Skipping '{label}' — no video files found", file=sys.stderr)
-
-        if not shows:
+        if not flat_slots:
             print("No video files found.", file=sys.stderr)
             return 0
-
-        print(f"Found {len(shows)} show(s):")
-        for name, files in shows:
+        print(f"Found {len(flat_slots)} slot(s):")
+        for name, files in flat_slots:
             print(f"  {name}: {len(files)} episode(s)")
-
-        playlist = interleave([files for _, files in shows], repeat=repeat)
+        playlist = interleave([files for _, files in flat_slots], repeat=repeat)
         if shuffle_mode == "episodes":
             playlist = shuffle_in_blocks(playlist, shuffle_n)
 
@@ -329,6 +376,7 @@ def _print_menu(
     shuffle_n: int,
     show_info: list[ShowInfo],
     selected: set[str],
+    groups: list[list[str]],
 ) -> None:
     _clear()
     print("=" * 54)
@@ -353,9 +401,12 @@ def _print_menu(
         shows_str = "scanning..."
     else:
         shows_str = "none"
+    n_groups = len(groups)
+    groups_str = f"{n_groups} defined" if n_groups else "none"
 
     print("Settings:")
     print(f"  Shows       : {shows_str}")
+    print(f"  Groups      : {groups_str}")
     print(f"  Output      : {out_str}")
     print(f"  Path style  : {'relative' if relative else 'absolute'}")
     print(f"  Repeat      : {'on' if repeat else 'off'}")
@@ -367,6 +418,7 @@ def _print_menu(
         print("  [x] Remove source directory")
     if show_info:
         print("  [w] Select shows")
+        print("  [G] Manage groups")
     print("  [o] Set output file")
     print("  [p] Toggle path style  (absolute / relative)")
     print("  [r] Toggle repeat shorter shows")
@@ -443,6 +495,126 @@ def _selection_screen(
                             selected.add(label)
 
 
+def _groups_screen(
+    show_info: list[ShowInfo],
+    selected: set[str],
+    groups: list[list[str]],
+) -> list[list[str]]:
+    """Full-screen group management. Returns updated groups list.
+
+    Only selected shows are listed. Commands:
+      g <n> [n]...  create new group from listed show numbers
+      a <g#> <n>    append show n to existing group g#
+      r <n>         remove show n from its group
+      d <g#>        delete group g#
+      b             back
+    """
+    groups = [list(g) for g in groups]  # shallow copy so caller's list isn't mutated live
+
+    while True:
+        visible = [(label, path, ns, ne) for label, path, ns, ne in show_info if label in selected]
+        if not visible:
+            input("No shows selected. Press Enter...")
+            return groups
+
+        # Build label → group index map for display
+        label_to_g: dict[str, int] = {}
+        for g_idx, g in enumerate(groups):
+            for lbl in g:
+                if lbl not in label_to_g:
+                    label_to_g[lbl] = g_idx
+
+        max_name = max((len(label) for label, *_ in visible), default=10)
+        n_groups = len(groups)
+
+        _clear()
+        print("─" * 54)
+        g_word = f"{n_groups} group{'s' if n_groups != 1 else ''}" if n_groups else "no groups"
+        print(f"  Show Groups  ({g_word})")
+        print("─" * 54)
+        print()
+        for i, (label, _, n_seasons, n_eps) in enumerate(visible, 1):
+            if label in label_to_g:
+                tag = f"G{label_to_g[label] + 1}"
+            else:
+                tag = "●"
+            s_str = f"{n_seasons} season{'s' if n_seasons != 1 else ' '}"
+            e_str = f"{n_eps} ep{'s' if n_eps != 1 else ' '}"
+            print(f"  {tag:<3} {i:>2}. {label:<{max_name}}  {s_str:>10}  {e_str:>7}")
+        print()
+        print("  g <num> [num]...  create new group from listed shows")
+        print("  a <group#> <num>  add show to existing group")
+        print("  r <num>           remove show from its group")
+        print("  d <group#>        delete entire group")
+        print("  [b]               back")
+        print()
+        raw = input("  > ").strip()
+        tokens = raw.split()
+        if not tokens:
+            continue
+
+        cmd = tokens[0].lower()
+
+        if cmd == "b":
+            return groups
+
+        elif cmd == "g" and len(tokens) >= 2:
+            new_group: list[str] = []
+            for tok in tokens[1:]:
+                if tok.isdigit():
+                    idx = int(tok) - 1
+                    if 0 <= idx < len(visible):
+                        label = visible[idx][0]
+                        if label not in new_group:
+                            new_group.append(label)
+            if new_group:
+                # Remove these labels from any existing group first
+                groups = [
+                    [lbl for lbl in g if lbl not in new_group]
+                    for g in groups
+                ]
+                groups = [g for g in groups if g]
+                groups.append(new_group)
+
+        elif cmd == "a" and len(tokens) == 3:
+            g_tok, n_tok = tokens[1], tokens[2]
+            if g_tok.isdigit() and n_tok.isdigit():
+                g_idx = int(g_tok) - 1
+                show_idx = int(n_tok) - 1
+                if 0 <= g_idx < len(groups) and 0 <= show_idx < len(visible):
+                    label = visible[show_idx][0]
+                    # Remove from any current group
+                    groups = [
+                        [lbl for lbl in g if lbl != label]
+                        for g in groups
+                    ]
+                    groups = [g for g in groups if g]
+                    # Re-find target group index (list may have shifted after cleanup)
+                    # Re-parse g_idx after cleanup is complex; just append to the group
+                    # identified before cleanup if it still exists
+                    if g_idx < len(groups):
+                        groups[g_idx].append(label)
+                    else:
+                        groups.append([label])
+
+        elif cmd == "r" and len(tokens) == 2:
+            if tokens[1].isdigit():
+                show_idx = int(tokens[1]) - 1
+                if 0 <= show_idx < len(visible):
+                    label = visible[show_idx][0]
+                    groups = [
+                        [lbl for lbl in g if lbl != label]
+                        for g in groups
+                    ]
+                    groups = [g for g in groups if g]
+
+        elif cmd == "d" and len(tokens) == 2:
+            if tokens[1].isdigit():
+                g_idx = int(tokens[1]) - 1
+                if 0 <= g_idx < len(groups):
+                    groups.pop(g_idx)
+
+
 def interactive_mode() -> None:
     dirs: list[Path] = []
     output: Path | None = None
@@ -452,18 +624,26 @@ def interactive_mode() -> None:
     shuffle_n = 10
     show_info: list[ShowInfo] = []
     selected: set[str] = set()
+    groups: list[list[str]] = []
 
     def rescan() -> None:
-        nonlocal show_info, selected
+        nonlocal show_info, selected, groups
         old_labels = {label for label, *_ in show_info}
         show_info = _refresh_shows(dirs)
         new_labels = {label for label, *_ in show_info}
         # Preserve existing selections; auto-select shows that are newly discovered
         selected = (selected & new_labels) | (new_labels - old_labels)
+        # Remove stale labels from groups; drop empty groups
+        groups = [
+            [lbl for lbl in g if lbl in new_labels]
+            for g in groups
+        ]
+        groups = [g for g in groups if g]
 
     while True:
-        _print_menu(dirs, output, relative, repeat, shuffle_mode, shuffle_n, show_info, selected)
-        choice = input("Choice: ").strip().lower()
+        _print_menu(dirs, output, relative, repeat, shuffle_mode, shuffle_n, show_info, selected, groups)
+        raw_choice = input("Choice: ").strip()
+        choice = raw_choice.lower()
 
         if choice == "a":
             raw = input("Directory path: ").strip()
@@ -481,6 +661,7 @@ def interactive_mode() -> None:
                 dirs.clear()
                 show_info = []
                 selected = set()
+                groups = []
             else:
                 _clear()
                 print("Remove which directory?\n")
@@ -496,6 +677,9 @@ def interactive_mode() -> None:
 
         elif choice == "w" and show_info:
             selected = _selection_screen(show_info, selected)
+
+        elif raw_choice == "G" and show_info:
+            groups = _groups_screen(show_info, selected, groups)
 
         elif choice == "o":
             raw = input("Output file path (Enter for auto): ").strip()
@@ -515,7 +699,10 @@ def interactive_mode() -> None:
             include = {label for label, *_ in show_info if label in selected}
             print()
             try:
-                count = build_playlist(dirs, out, relative, repeat, shuffle_mode, shuffle_n, include=include)
+                count = build_playlist(
+                    dirs, out, relative, repeat, shuffle_mode, shuffle_n,
+                    include=include, groups=groups,
+                )
             except Exception as e:
                 input(f"\nError generating playlist: {e}\nPress Enter...")
                 continue
