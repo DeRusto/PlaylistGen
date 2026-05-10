@@ -156,6 +156,10 @@ def interleave_by_season(
 # Directory scanning
 # ---------------------------------------------------------------------------
 
+# (label, show_path, num_seasons, num_episodes)
+ShowInfo = tuple[str, Path, int, int]
+
+
 def _scan_dirs(dirs: list[Path]) -> list[tuple[str, Path]]:
     """Scan each media dir for show subdirectories, returning (label, path) pairs.
 
@@ -184,6 +188,17 @@ def _scan_dirs(dirs: list[Path]) -> list[tuple[str, Path]]:
     return result
 
 
+def _refresh_shows(dirs: list[Path]) -> list[ShowInfo]:
+    """Scan dirs and return (label, path, n_seasons, n_episodes) for every show that has video files."""
+    result: list[ShowInfo] = []
+    for label, d in _scan_dirs(dirs):
+        seasons = collect_show_seasons(d)
+        n_eps = sum(len(s) for s in seasons)
+        if n_eps > 0:
+            result.append((label, d, len(seasons), n_eps))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Playlist builder
 # ---------------------------------------------------------------------------
@@ -195,17 +210,22 @@ def build_playlist(
     repeat: bool = False,
     shuffle_mode: str = "none",
     shuffle_n: int = 10,
+    include: set[str] | None = None,
 ) -> int:
     """Scan dirs for shows, interleave/shuffle episodes, write M3U. Returns episode count.
 
     shuffle_mode: "none" | "episodes" | "seasons"
     shuffle_n:   block size used when shuffle_mode == "episodes"
+    include:     when set, only shows whose label is in this set are used
     """
     if not dirs:
         print("No directories specified.", file=sys.stderr)
         return 0
 
     show_entries = _scan_dirs(dirs)
+    if include is not None:
+        show_entries = [(label, d) for label, d in show_entries if label in include]
+
     if not show_entries:
         print("No show subdirectories found.", file=sys.stderr)
         return 0
@@ -286,6 +306,8 @@ def _print_menu(
     repeat: bool,
     shuffle_mode: str,
     shuffle_n: int,
+    show_info: list[ShowInfo],
+    selected: set[str],
 ) -> None:
     _clear()
     print("=" * 54)
@@ -299,9 +321,20 @@ def _print_menu(
     else:
         print("  (none — add at least one with [a])")
     print()
+
     out_str = str(output) if output else "(auto: interleaved.m3u in first source dir)"
     shuffle_str = _SHUFFLE_LABELS[shuffle_mode].format(n=shuffle_n)
+    n_total = len(show_info)
+    n_sel = sum(1 for label, *_ in show_info if label in selected)
+    if n_total:
+        shows_str = f"{n_total} found, {n_sel} selected"
+    elif dirs:
+        shows_str = "scanning..."
+    else:
+        shows_str = "none"
+
     print("Settings:")
+    print(f"  Shows       : {shows_str}")
     print(f"  Output      : {out_str}")
     print(f"  Path style  : {'relative' if relative else 'absolute'}")
     print(f"  Repeat      : {'on' if repeat else 'off'}")
@@ -311,11 +344,13 @@ def _print_menu(
     print("  [a] Add source directory")
     if dirs:
         print("  [x] Remove source directory")
+    if show_info:
+        print("  [w] Select shows")
     print("  [o] Set output file")
     print("  [p] Toggle path style  (absolute / relative)")
     print("  [r] Toggle repeat shorter shows")
     print("  [s] Configure shuffle")
-    if dirs:
+    if dirs and selected:
         print("  [g] Generate playlist")
     print("  [q] Quit")
     print()
@@ -343,6 +378,50 @@ def _shuffle_submenu(current_mode: str, current_n: int) -> tuple[str, int]:
     return current_mode, current_n
 
 
+def _selection_screen(
+    show_info: list[ShowInfo],
+    selected: set[str],
+) -> set[str]:
+    selected = set(selected)
+    max_name = max((len(label) for label, *_ in show_info), default=10)
+
+    while True:
+        _clear()
+        n_total = len(show_info)
+        n_sel = sum(1 for label, *_ in show_info if label in selected)
+        print("─" * 54)
+        print(f"  Show Selection  ({n_sel}/{n_total} selected)")
+        print("─" * 54)
+        print()
+        for i, (label, _, n_seasons, n_eps) in enumerate(show_info, 1):
+            mark = "✓" if label in selected else " "
+            s_str = f"{n_seasons} season{'s' if n_seasons != 1 else ' '}"
+            e_str = f"{n_eps} ep{'s' if n_eps != 1 else ' '}"
+            print(f"  [{mark}] {i:>2}. {label:<{max_name}}  {s_str:>10}  {e_str:>7}")
+        print()
+        print("  Enter number(s) to toggle (e.g. 3  or  1 4 7),")
+        print("  [a] select all,  [n] select none,  [b] back")
+        print()
+        raw = input("  > ").strip().lower()
+
+        if raw == "b":
+            return selected
+        elif raw == "a":
+            selected = {label for label, *_ in show_info}
+        elif raw == "n":
+            selected = set()
+        else:
+            for token in raw.replace(",", " ").split():
+                if token.isdigit():
+                    idx = int(token) - 1
+                    if 0 <= idx < len(show_info):
+                        label = show_info[idx][0]
+                        if label in selected:
+                            selected.discard(label)
+                        else:
+                            selected.add(label)
+
+
 def interactive_mode() -> None:
     dirs: list[Path] = []
     output: Path | None = None
@@ -350,9 +429,19 @@ def interactive_mode() -> None:
     repeat = False
     shuffle_mode = "none"
     shuffle_n = 10
+    show_info: list[ShowInfo] = []
+    selected: set[str] = set()
+
+    def rescan() -> None:
+        nonlocal show_info, selected
+        old_labels = {label for label, *_ in show_info}
+        show_info = _refresh_shows(dirs)
+        new_labels = {label for label, *_ in show_info}
+        # Preserve existing selections; auto-select shows that are newly discovered
+        selected = (selected & new_labels) | (new_labels - old_labels)
 
     while True:
-        _print_menu(dirs, output, relative, repeat, shuffle_mode, shuffle_n)
+        _print_menu(dirs, output, relative, repeat, shuffle_mode, shuffle_n, show_info, selected)
         choice = input("Choice: ").strip().lower()
 
         if choice == "a":
@@ -361,12 +450,16 @@ def interactive_mode() -> None:
                 p = Path(raw).expanduser().resolve()
                 if p.is_dir():
                     dirs.append(p)
+                    print("Scanning...", end="\r", flush=True)
+                    rescan()
                 else:
                     input(f"'{p}' is not a valid directory. Press Enter...")
 
         elif choice == "x" and dirs:
             if len(dirs) == 1:
                 dirs.clear()
+                show_info = []
+                selected = set()
             else:
                 _clear()
                 print("Remove which directory?\n")
@@ -377,6 +470,11 @@ def interactive_mode() -> None:
                     idx = int(raw) - 1
                     if 0 <= idx < len(dirs):
                         dirs.pop(idx)
+                        print("Scanning...", end="\r", flush=True)
+                        rescan()
+
+        elif choice == "w" and show_info:
+            selected = _selection_screen(show_info, selected)
 
         elif choice == "o":
             raw = input("Output file path (Enter for auto): ").strip()
@@ -391,10 +489,11 @@ def interactive_mode() -> None:
         elif choice == "s":
             shuffle_mode, shuffle_n = _shuffle_submenu(shuffle_mode, shuffle_n)
 
-        elif choice == "g" and dirs:
+        elif choice == "g" and dirs and selected:
             out = output or (dirs[0] / "interleaved.m3u")
+            include = {label for label, *_ in show_info if label in selected}
             print()
-            count = build_playlist(dirs, out, relative, repeat, shuffle_mode, shuffle_n)
+            count = build_playlist(dirs, out, relative, repeat, shuffle_mode, shuffle_n, include=include)
             if count:
                 input(f"\nPlaylist written: {out}  ({count} entries)\nPress Enter...")
             else:

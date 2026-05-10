@@ -482,6 +482,28 @@ def test_build_shuffle_seasons_preserves_count(tmp_path):
     assert len(set(paths)) == 6  # no duplicates
 
 
+def test_build_include_excludes_shows(tmp_path):
+    _make_tree(tmp_path, {
+        "ShowA": ["a01.mkv", "a02.mkv"],
+        "ShowB": ["b01.mkv", "b02.mkv"],
+        "ShowC": ["c01.mkv"],
+    })
+    out = tmp_path / "out.m3u"
+    count = build_playlist([tmp_path], out, relative=False, include={"ShowA", "ShowC"})
+
+    assert count == 3
+    names = {Path(p).name for p in _read_playlist_paths(out)}
+    assert names == {"a01.mkv", "a02.mkv", "c01.mkv"}
+    assert not any("b" in n for n in names)
+
+
+def test_build_include_empty_set_produces_nothing(tmp_path):
+    _make_tree(tmp_path, {"ShowA": ["a01.mkv"]})
+    out = tmp_path / "out.m3u"
+    count = build_playlist([tmp_path], out, relative=False, include=set())
+    assert count == 0
+
+
 def test_m3u_header(tmp_path):
     _make_tree(tmp_path, {"ShowA": ["ep1.mkv"]})
     out = tmp_path / "out.m3u"
