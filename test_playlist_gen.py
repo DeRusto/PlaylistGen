@@ -1,12 +1,49 @@
 """Tests for playlist_gen.py"""
 
 import os
-import tempfile
+import random
 from pathlib import Path
 
 import pytest
 
-from playlist_gen import collect_show_files, interleave, build_playlist, natural_sort_key, _natural_key
+from playlist_gen import (
+    _natural_key,
+    natural_sort_key,
+    collect_show_files,
+    collect_show_seasons,
+    interleave,
+    shuffle_in_blocks,
+    interleave_by_season,
+    build_playlist,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_tree(base: Path, structure: dict[str, list[str]]):
+    """Create show subdirs with dummy video files directly inside each."""
+    for show, episodes in structure.items():
+        show_dir = base / show
+        show_dir.mkdir(exist_ok=True)
+        for ep in episodes:
+            (show_dir / ep).write_text("")
+
+
+def _make_season_tree(show_dir: Path, seasons: dict[str, list[str]]):
+    """Create season subdirs with dummy video files inside show_dir."""
+    show_dir.mkdir(parents=True, exist_ok=True)
+    for season, episodes in seasons.items():
+        season_dir = show_dir / season
+        season_dir.mkdir()
+        for ep in episodes:
+            (season_dir / ep).write_text("")
+
+
+def _read_playlist_paths(m3u: Path) -> list[str]:
+    lines = m3u.read_text().splitlines()
+    return [l for l in lines if l and not l.startswith("#")]
 
 
 # ---------------------------------------------------------------------------
@@ -23,16 +60,6 @@ def test_natural_sort_numeric_order():
 # ---------------------------------------------------------------------------
 # collect_show_files — season subdirectory support
 # ---------------------------------------------------------------------------
-
-def _make_season_tree(show_dir: Path, seasons: dict[str, list[str]]):
-    """Create season subdirs with dummy video files inside show_dir."""
-    show_dir.mkdir(parents=True, exist_ok=True)
-    for season, episodes in seasons.items():
-        season_dir = show_dir / season
-        season_dir.mkdir()
-        for ep in episodes:
-            (season_dir / ep).write_text("")
-
 
 def test_collect_flat_show_unchanged(tmp_path):
     show = tmp_path / "Show"
@@ -86,6 +113,71 @@ def test_collect_episodes_within_season_natural_order(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# collect_show_seasons
+# ---------------------------------------------------------------------------
+
+def test_seasons_flat_show(tmp_path):
+    show = tmp_path / "Show"
+    show.mkdir()
+    for n in ["ep1.mkv", "ep2.mkv"]:
+        (show / n).write_text("")
+    result = collect_show_seasons(show)
+    assert len(result) == 1
+    assert [f.name for f in result[0]] == ["ep1.mkv", "ep2.mkv"]
+
+
+def test_seasons_single_season_dir(tmp_path):
+    show = tmp_path / "Show"
+    _make_season_tree(show, {"Season 1": ["s01e01.mkv", "s01e02.mkv"]})
+    result = collect_show_seasons(show)
+    assert len(result) == 1
+    assert [f.name for f in result[0]] == ["s01e01.mkv", "s01e02.mkv"]
+
+
+def test_seasons_multiple_season_dirs(tmp_path):
+    show = tmp_path / "Show"
+    _make_season_tree(show, {
+        "Season 1": ["s01e01.mkv", "s01e02.mkv"],
+        "Season 2": ["s02e01.mkv"],
+    })
+    result = collect_show_seasons(show)
+    assert len(result) == 2
+    assert [f.name for f in result[0]] == ["s01e01.mkv", "s01e02.mkv"]
+    assert [f.name for f in result[1]] == ["s02e01.mkv"]
+
+
+def test_seasons_natural_ordering(tmp_path):
+    show = tmp_path / "Show"
+    _make_season_tree(show, {
+        "Season 2":  ["s02e01.mkv"],
+        "Season 10": ["s10e01.mkv"],
+        "Season 1":  ["s01e01.mkv"],
+    })
+    result = collect_show_seasons(show)
+    assert len(result) == 3
+    assert result[0][0].name == "s01e01.mkv"
+    assert result[1][0].name == "s02e01.mkv"
+    assert result[2][0].name == "s10e01.mkv"
+
+
+def test_seasons_mixed_root_files_and_season_dirs(tmp_path):
+    show = tmp_path / "Show"
+    _make_season_tree(show, {"Season 1": ["s01e01.mkv"]})
+    (show / "special.mkv").write_text("")  # file directly in show root
+    result = collect_show_seasons(show)
+    # Root files come first, then season dirs
+    assert len(result) == 2
+    assert result[0][0].name == "special.mkv"
+    assert result[1][0].name == "s01e01.mkv"
+
+
+def test_seasons_empty_show(tmp_path):
+    show = tmp_path / "Show"
+    show.mkdir()
+    assert collect_show_seasons(show) == []
+
+
+# ---------------------------------------------------------------------------
 # interleave
 # ---------------------------------------------------------------------------
 
@@ -128,12 +220,10 @@ def test_interleave_empty():
 def test_interleave_repeat_unequal_length():
     a = [1, 2, 3]
     b = [4, 5]
-    # b cycles: slot 3 → 4 (b[0])
     assert interleave([a, b], repeat=True) == [1, 4, 2, 5, 3, 4]
 
 
 def test_interleave_repeat_equal_length():
-    # repeat should behave identically to non-repeat when lengths match
     a = [1, 2]
     b = [3, 4]
     assert interleave([a, b], repeat=True) == interleave([a, b])
@@ -143,7 +233,6 @@ def test_interleave_repeat_three_shows():
     a = ["a1", "a2", "a3"]
     b = ["b1", "b2"]
     c = ["c1", "c2", "c3", "c4"]
-    # length governed by c (4); a cycles at pos 4 → a1, b cycles at pos 3 → b1 and pos 4 → b2
     assert interleave([a, b, c], repeat=True) == [
         "a1", "b1", "c1",
         "a2", "b2", "c2",
@@ -157,22 +246,85 @@ def test_interleave_repeat_single_show():
 
 
 # ---------------------------------------------------------------------------
-# build_playlist (filesystem integration)
+# shuffle_in_blocks
 # ---------------------------------------------------------------------------
 
-def _make_tree(base: Path, structure: dict[str, list[str]]):
-    """Create subdirs with dummy video files."""
-    for show, episodes in structure.items():
-        show_dir = base / show
-        show_dir.mkdir()
-        for ep in episodes:
-            (show_dir / ep).write_text("")
+def test_shuffle_in_blocks_preserves_all_items():
+    eps = [Path(f"ep{i:02d}.mkv") for i in range(9)]
+    random.seed(0)
+    result = shuffle_in_blocks(eps, 3)
+    assert len(result) == 9
+    assert set(result) == set(eps)
 
 
-def _read_playlist_paths(m3u: Path) -> list[str]:
-    lines = m3u.read_text().splitlines()
-    return [l for l in lines if l and not l.startswith("#")]
+def test_shuffle_in_blocks_respects_boundaries():
+    eps = [Path(f"ep{i:02d}.mkv") for i in range(6)]
+    random.seed(0)
+    result = shuffle_in_blocks(eps, 3)
+    # Each half must still be contained within its block boundary
+    assert set(result[:3]) == {Path("ep00.mkv"), Path("ep01.mkv"), Path("ep02.mkv")}
+    assert set(result[3:]) == {Path("ep03.mkv"), Path("ep04.mkv"), Path("ep05.mkv")}
 
+
+def test_shuffle_in_blocks_partial_last_block():
+    eps = [Path(f"ep{i:02d}.mkv") for i in range(5)]
+    random.seed(0)
+    result = shuffle_in_blocks(eps, 3)
+    assert len(result) == 5
+    assert set(result) == set(eps)
+
+
+def test_shuffle_in_blocks_size_one_is_noop():
+    eps = [Path(f"ep{i:02d}.mkv") for i in range(4)]
+    result = shuffle_in_blocks(eps, 1)
+    assert result == eps
+
+
+# ---------------------------------------------------------------------------
+# interleave_by_season
+# ---------------------------------------------------------------------------
+
+def test_interleave_by_season_total_count():
+    sa = [[Path("a01.mkv"), Path("a02.mkv")], [Path("a03.mkv")]]
+    sb = [[Path("b01.mkv")], [Path("b02.mkv"), Path("b03.mkv")]]
+    random.seed(0)
+    result = interleave_by_season([sa, sb])
+    assert len(result) == 6
+    assert set(result) == {
+        Path("a01.mkv"), Path("a02.mkv"), Path("a03.mkv"),
+        Path("b01.mkv"), Path("b02.mkv"), Path("b03.mkv"),
+    }
+
+
+def test_interleave_by_season_shorter_show_skipped():
+    sa = [[Path("a01.mkv")], [Path("a02.mkv")]]  # 2 seasons
+    sb = [[Path("b01.mkv")]]                       # 1 season
+    random.seed(0)
+    result = interleave_by_season([sa, sb])
+    # Season 1: a01 + b01; Season 2: a02 only
+    assert len(result) == 3
+    assert Path("a01.mkv") in result
+    assert Path("b01.mkv") in result
+    assert Path("a02.mkv") in result
+
+
+def test_interleave_by_season_repeat():
+    sa = [[Path("a01.mkv")], [Path("a02.mkv")]]  # 2 seasons
+    sb = [[Path("b01.mkv")]]                       # 1 season — cycles
+    random.seed(0)
+    result = interleave_by_season([sa, sb], repeat=True)
+    # Season 1: a01 + b01; Season 2: a02 + b01 (cycled)
+    assert len(result) == 4
+    assert result.count(Path("b01.mkv")) == 2
+
+
+def test_interleave_by_season_empty():
+    assert interleave_by_season([]) == []
+
+
+# ---------------------------------------------------------------------------
+# build_playlist (filesystem integration)
+# ---------------------------------------------------------------------------
 
 def test_build_two_shows(tmp_path):
     _make_tree(tmp_path, {
@@ -180,17 +332,13 @@ def test_build_two_shows(tmp_path):
         "ShowB": ["b01.mkv", "b02.mkv"],
     })
     out = tmp_path / "out.m3u"
-    count = build_playlist(tmp_path, out, relative=True)
+    count = build_playlist([tmp_path], out, relative=True)
 
     assert count == 5
     paths = _read_playlist_paths(out)
-    assert len(paths) == 5
-    # First entry must be ShowA ep1, second ShowB ep1, etc.
-    assert Path(paths[0]).name == "a01.mkv"
-    assert Path(paths[1]).name == "b01.mkv"
-    assert Path(paths[2]).name == "a02.mkv"
-    assert Path(paths[3]).name == "b02.mkv"
-    assert Path(paths[4]).name == "a03.mkv"
+    assert [Path(p).name for p in paths] == [
+        "a01.mkv", "b01.mkv", "a02.mkv", "b02.mkv", "a03.mkv",
+    ]
 
 
 def test_build_ignores_non_video_files(tmp_path):
@@ -202,25 +350,23 @@ def test_build_ignores_non_video_files(tmp_path):
     (show_dir / "info.nfo").write_text("")
 
     out = tmp_path / "out.m3u"
-    count = build_playlist(tmp_path, out, relative=False)
+    count = build_playlist([tmp_path], out, relative=False)
     assert count == 2
 
 
 def test_build_skips_empty_show_dirs(tmp_path):
-    _make_tree(tmp_path, {
-        "ShowA": ["a01.mkv"],
-    })
-    (tmp_path / "Empty").mkdir()  # no video files
+    _make_tree(tmp_path, {"ShowA": ["a01.mkv"]})
+    (tmp_path / "Empty").mkdir()
 
     out = tmp_path / "out.m3u"
-    count = build_playlist(tmp_path, out, relative=False)
+    count = build_playlist([tmp_path], out, relative=False)
     assert count == 1
 
 
 def test_build_relative_paths(tmp_path):
     _make_tree(tmp_path, {"ShowA": ["ep1.mkv"]})
     out = tmp_path / "out.m3u"
-    build_playlist(tmp_path, out, relative=True)
+    build_playlist([tmp_path], out, relative=True)
     paths = _read_playlist_paths(out)
     assert not os.path.isabs(paths[0])
 
@@ -228,14 +374,14 @@ def test_build_relative_paths(tmp_path):
 def test_build_absolute_paths(tmp_path):
     _make_tree(tmp_path, {"ShowA": ["ep1.mkv"]})
     out = tmp_path / "out.m3u"
-    build_playlist(tmp_path, out, relative=False)
+    build_playlist([tmp_path], out, relative=False)
     paths = _read_playlist_paths(out)
     assert os.path.isabs(paths[0])
 
 
 def test_build_returns_zero_for_empty_dir(tmp_path):
     out = tmp_path / "out.m3u"
-    count = build_playlist(tmp_path, out, relative=False)
+    count = build_playlist([tmp_path], out, relative=False)
     assert count == 0
 
 
@@ -245,16 +391,14 @@ def test_build_repeat_cycles_shorter_show(tmp_path):
         "ShowB": ["b01.mkv", "b02.mkv"],
     })
     out = tmp_path / "out.m3u"
-    count = build_playlist(tmp_path, out, relative=True, repeat=True)
+    count = build_playlist([tmp_path], out, relative=True, repeat=True)
 
-    assert count == 6  # 3 (longest) × 2 shows
-    paths = _read_playlist_paths(out)
-    names = [Path(p).name for p in paths]
+    assert count == 6
+    names = [Path(p).name for p in _read_playlist_paths(out)]
     assert names == ["a01.mkv", "b01.mkv", "a02.mkv", "b02.mkv", "a03.mkv", "b01.mkv"]
 
 
 def test_build_season_show_interleaved_with_flat_show(tmp_path):
-    # ShowA has season subdirs; ShowB is flat
     show_a = tmp_path / "ShowA"
     _make_season_tree(show_a, {
         "Season 1": ["s01e01.mkv", "s01e02.mkv"],
@@ -266,11 +410,10 @@ def test_build_season_show_interleaved_with_flat_show(tmp_path):
         (show_b / name).write_text("")
 
     out = tmp_path / "out.m3u"
-    count = build_playlist(tmp_path, out, relative=True)
+    count = build_playlist([tmp_path], out, relative=True)
 
     assert count == 6
-    paths = _read_playlist_paths(out)
-    names = [Path(p).name for p in paths]
+    names = [Path(p).name for p in _read_playlist_paths(out)]
     assert names == [
         "s01e01.mkv", "b01.mkv",
         "s01e02.mkv", "b02.mkv",
@@ -278,9 +421,69 @@ def test_build_season_show_interleaved_with_flat_show(tmp_path):
     ]
 
 
+def test_build_multiple_dirs(tmp_path):
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+    _make_tree(dir1, {"ShowA": ["a01.mkv", "a02.mkv"]})
+    _make_tree(dir2, {"ShowB": ["b01.mkv", "b02.mkv"]})
+
+    out = tmp_path / "out.m3u"
+    count = build_playlist([dir1, dir2], out, relative=False)
+
+    assert count == 4
+    names = [Path(p).name for p in _read_playlist_paths(out)]
+    assert names == ["a01.mkv", "b01.mkv", "a02.mkv", "b02.mkv"]
+
+
+def test_build_multiple_dirs_duplicate_show_names(tmp_path):
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+    _make_tree(dir1, {"ShowA": ["a01.mkv"]})
+    _make_tree(dir2, {"ShowA": ["a02.mkv"]})  # same name in a different dir
+
+    out = tmp_path / "out.m3u"
+    count = build_playlist([dir1, dir2], out, relative=False)
+
+    assert count == 2  # both episodes included, despite same show name
+
+
+def test_build_shuffle_episodes_preserves_count(tmp_path):
+    _make_tree(tmp_path, {
+        "ShowA": [f"a{i:02d}.mkv" for i in range(5)],
+        "ShowB": [f"b{i:02d}.mkv" for i in range(5)],
+    })
+    out = tmp_path / "out.m3u"
+    random.seed(42)
+    count = build_playlist([tmp_path], out, relative=False, shuffle_mode="episodes", shuffle_n=3)
+
+    assert count == 10
+    paths = _read_playlist_paths(out)
+    assert len(paths) == 10
+    # No duplicates
+    assert len(set(paths)) == 10
+
+
+def test_build_shuffle_seasons_preserves_count(tmp_path):
+    show_a = tmp_path / "ShowA"
+    show_b = tmp_path / "ShowB"
+    _make_season_tree(show_a, {"Season 1": ["s01e01.mkv", "s01e02.mkv"], "Season 2": ["s02e01.mkv"]})
+    _make_season_tree(show_b, {"Season 1": ["b01e01.mkv"], "Season 2": ["b02e01.mkv", "b02e02.mkv"]})
+
+    out = tmp_path / "out.m3u"
+    random.seed(42)
+    count = build_playlist([tmp_path], out, relative=False, shuffle_mode="seasons")
+
+    assert count == 6
+    paths = _read_playlist_paths(out)
+    assert len(set(paths)) == 6  # no duplicates
+
+
 def test_m3u_header(tmp_path):
     _make_tree(tmp_path, {"ShowA": ["ep1.mkv"]})
     out = tmp_path / "out.m3u"
-    build_playlist(tmp_path, out, relative=False)
-    content = out.read_text()
-    assert content.startswith("#EXTM3U\n")
+    build_playlist([tmp_path], out, relative=False)
+    assert out.read_text().startswith("#EXTM3U\n")
