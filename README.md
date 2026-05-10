@@ -235,7 +235,15 @@ Episodes play in broadcast order, interleaved round-robin.
 
 ### Episodes (`--shuffle episodes`)
 
-The interleaved playlist is shuffled in consecutive blocks of N episodes (default N = 10, set with `--shuffle-n`). Episodes within each block are randomised; blocks stay in order so you broadly progress through the shows.
+Watch N consecutive episodes of each show (in broadcast order) before switching to the next. The round-robin cycle repeats with the next block of N episodes from each show.
+
+```
+ShowA:  a1 a2 a3 a4 a5
+ShowB:  b1 b2 b3
+N = 2 → a1 a2  b1 b2  a3 a4  b3  a5
+```
+
+Set the block size with `--shuffle-n N` (default 10). Episodes always play in their natural order — no randomisation.
 
 ### Seasons (`--shuffle seasons`)
 

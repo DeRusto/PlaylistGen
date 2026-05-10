@@ -138,6 +138,35 @@ def shuffle_in_blocks(playlist: list[Path], block_size: int) -> list[Path]:
     return result
 
 
+def interleave_in_blocks(lists: list[list], block_size: int, repeat: bool = False) -> list:
+    """Interleave shows in consecutive blocks of block_size episodes, keeping episode order.
+
+    Each round gives block_size consecutive episodes from each show in turn.
+    Episodes always play in their natural order — no randomisation.
+
+      [a1,a2,a3,a4,a5], [b1,b2,b3], block_size=2
+      → a1 a2  b1 b2  a3 a4  b3  a5
+    """
+    if not lists:
+        return []
+    if repeat:
+        max_len = max(len(lst) for lst in lists)
+        cycled = [list(islice(cycle(lst), max_len)) for lst in lists]
+        result = []
+        for i in range(0, max_len, block_size):
+            for lst in cycled:
+                result.extend(lst[i:i + block_size])
+        return result
+    max_len = max(len(lst) for lst in lists)
+    result = []
+    for i in range(0, max_len, block_size):
+        for lst in lists:
+            block = lst[i:i + block_size]
+            if block:
+                result.extend(block)
+    return result
+
+
 def interleave_by_season(
     show_seasons: list[list[list[Path]]], repeat: bool = False
 ) -> list[Path]:
@@ -340,9 +369,10 @@ def build_playlist(
         print(f"Found {len(flat_slots)} slot(s):")
         for name, files in flat_slots:
             print(f"  {name}: {len(files)} episode(s)")
-        playlist = interleave([files for _, files in flat_slots], repeat=repeat)
         if shuffle_mode == "episodes":
-            playlist = shuffle_in_blocks(playlist, shuffle_n)
+            playlist = interleave_in_blocks([files for _, files in flat_slots], shuffle_n, repeat=repeat)
+        else:
+            playlist = interleave([files for _, files in flat_slots], repeat=repeat)
 
     try:
         with output.open("w", encoding="utf-8") as fh:
@@ -449,7 +479,7 @@ def _shuffle_submenu(current_mode: str, current_n: int) -> tuple[str, int]:
     print("  Shuffle mode")
     print("─" * 54)
     print("  [1] None           ordered round-robin, no randomness")
-    print("  [2] Per X episodes shuffle in blocks of X across all shows")
+    print("  [2] Per X episodes watch X episodes per show before switching")
     print("  [3] Per season     pool + shuffle episodes within each season")
     print("  [b] Back           keep current setting")
     print()

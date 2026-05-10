@@ -17,6 +17,7 @@ from playlist_gen import (
     collect_show_files,
     collect_show_seasons,
     interleave,
+    interleave_in_blocks,
     shuffle_in_blocks,
     interleave_by_season,
     build_playlist,
@@ -286,6 +287,40 @@ def test_shuffle_in_blocks_size_one_is_noop():
 
 
 # ---------------------------------------------------------------------------
+# interleave_in_blocks
+# ---------------------------------------------------------------------------
+
+def test_interleave_in_blocks_basic():
+    a = [1, 2, 3, 4, 5]
+    b = [6, 7, 8]
+    assert interleave_in_blocks([a, b], block_size=2) == [1, 2, 6, 7, 3, 4, 8, 5]
+
+
+def test_interleave_in_blocks_equal_length():
+    a = [1, 2, 3, 4]
+    b = [5, 6, 7, 8]
+    assert interleave_in_blocks([a, b], block_size=2) == [1, 2, 5, 6, 3, 4, 7, 8]
+
+
+def test_interleave_in_blocks_size_larger_than_list():
+    a = [1, 2]
+    b = [3, 4, 5, 6]
+    assert interleave_in_blocks([a, b], block_size=5) == [1, 2, 3, 4, 5, 6]
+
+
+def test_interleave_in_blocks_repeat():
+    a = [1, 2, 3]
+    b = [4, 5]
+    # max_len=3, cycled b=[4,5,4]; block_size=2
+    # round 0: a[0:2]=1,2 + b[0:2]=4,5; round 1: a[2:4]=3 + b[2:4]=4
+    assert interleave_in_blocks([a, b], block_size=2, repeat=True) == [1, 2, 4, 5, 3, 4]
+
+
+def test_interleave_in_blocks_empty():
+    assert interleave_in_blocks([], block_size=3) == []
+
+
+# ---------------------------------------------------------------------------
 # interleave_by_season
 # ---------------------------------------------------------------------------
 
@@ -456,20 +491,20 @@ def test_build_multiple_dirs_duplicate_show_names(tmp_path):
     assert count == 2  # both episodes included, despite same show name
 
 
-def test_build_shuffle_episodes_preserves_count(tmp_path):
+def test_build_shuffle_episodes_block_order(tmp_path):
+    """episodes mode plays block_size consecutive episodes per show in order before switching."""
     _make_tree(tmp_path, {
-        "ShowA": [f"a{i:02d}.mkv" for i in range(5)],
-        "ShowB": [f"b{i:02d}.mkv" for i in range(5)],
+        "ShowA": [f"a{i:02d}.mkv" for i in range(1, 6)],   # a01–a05
+        "ShowB": [f"b{i:02d}.mkv" for i in range(1, 4)],   # b01–b03
     })
     out = tmp_path / "out.m3u"
-    random.seed(42)
-    count = build_playlist([tmp_path], out, relative=False, shuffle_mode="episodes", shuffle_n=3)
+    count = build_playlist([tmp_path], out, relative=False, shuffle_mode="episodes", shuffle_n=2)
 
-    assert count == 10
-    paths = _read_playlist_paths(out)
-    assert len(paths) == 10
-    # No duplicates
-    assert len(set(paths)) == 10
+    assert count == 8
+    names = [Path(p).name for p in _read_playlist_paths(out)]
+    # Block size 2: a01,a02, b01,b02, a03,a04, b03, a05
+    assert names == ["a01.mkv", "a02.mkv", "b01.mkv", "b02.mkv",
+                     "a03.mkv", "a04.mkv", "b03.mkv", "a05.mkv"]
 
 
 def test_build_shuffle_seasons_preserves_count(tmp_path):
