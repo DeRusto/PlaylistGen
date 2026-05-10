@@ -247,6 +247,7 @@ def build_playlist(
     shuffle_n: int = 10,
     include: set[str] | None = None,
     groups: list[list[str]] | None = None,
+    show_order: str = "alpha",
 ) -> int:
     """Scan dirs for shows, interleave/shuffle episodes, write M3U. Returns episode count.
 
@@ -254,6 +255,7 @@ def build_playlist(
     shuffle_n:   block size used when shuffle_mode == "episodes"
     include:     when set, only shows whose label is in this set are used
     groups:      each element is an ordered list of show labels to treat as one round-robin slot
+    show_order:  "alpha" (default) | "random" — controls slot order and within-group order
     """
     if not dirs:
         print("No directories specified.", file=sys.stderr)
@@ -266,6 +268,10 @@ def build_playlist(
     if not show_entries:
         print("No show subdirectories found.", file=sys.stderr)
         return 0
+
+    if show_order == "random":
+        show_entries = list(show_entries)
+        random.shuffle(show_entries)
 
     effective_groups = groups or []
     label_to_path = {label: d for label, d in show_entries}
@@ -288,7 +294,10 @@ def build_playlist(
             if g_idx not in placed_groups:
                 placed_groups.add(g_idx)
                 g_labels = effective_groups[g_idx]
-                g_name = f"Group {g_idx + 1} ({', '.join(g_labels)})"
+                if show_order == "random":
+                    g_labels = list(g_labels)
+                    random.shuffle(g_labels)
+                g_name = f"Group {g_idx + 1} ({', '.join(effective_groups[g_idx])})"
                 if shuffle_mode == "seasons":
                     g_seasons = _collect_group_seasons(g_labels, label_to_path)
                     if g_seasons:
@@ -377,6 +386,7 @@ def _print_menu(
     show_info: list[ShowInfo],
     selected: set[str],
     groups: list[list[str]],
+    show_order: str,
 ) -> None:
     _clear()
     print("=" * 54)
@@ -404,12 +414,15 @@ def _print_menu(
     n_groups = len(groups)
     groups_str = f"{n_groups} defined" if n_groups else "none"
 
+    order_str = "alphabetical" if show_order == "alpha" else "random"
+
     print("Settings:")
     print(f"  Shows       : {shows_str}")
     print(f"  Groups      : {groups_str}")
     print(f"  Output      : {out_str}")
     print(f"  Path style  : {'relative' if relative else 'absolute'}")
     print(f"  Repeat      : {'on' if repeat else 'off'}")
+    print(f"  Show order  : {order_str}")
     print(f"  Shuffle     : {shuffle_str}")
     print()
     print("Commands:")
@@ -422,6 +435,7 @@ def _print_menu(
     print("  [o] Set output file")
     print("  [p] Toggle path style  (absolute / relative)")
     print("  [r] Toggle repeat shorter shows")
+    print("  [n] Toggle show order  (alphabetical / random)")
     print("  [s] Configure shuffle")
     if dirs and selected:
         print("  [g] Generate playlist")
@@ -622,6 +636,7 @@ def interactive_mode() -> None:
     repeat = False
     shuffle_mode = "none"
     shuffle_n = 10
+    show_order = "alpha"
     show_info: list[ShowInfo] = []
     selected: set[str] = set()
     groups: list[list[str]] = []
@@ -641,7 +656,7 @@ def interactive_mode() -> None:
         groups = [g for g in groups if g]
 
     while True:
-        _print_menu(dirs, output, relative, repeat, shuffle_mode, shuffle_n, show_info, selected, groups)
+        _print_menu(dirs, output, relative, repeat, shuffle_mode, shuffle_n, show_info, selected, groups, show_order)
         raw_choice = input("Choice: ").strip()
         choice = raw_choice.lower()
 
@@ -691,6 +706,9 @@ def interactive_mode() -> None:
         elif choice == "r":
             repeat = not repeat
 
+        elif choice == "n":
+            show_order = "random" if show_order == "alpha" else "alpha"
+
         elif choice == "s":
             shuffle_mode, shuffle_n = _shuffle_submenu(shuffle_mode, shuffle_n)
 
@@ -701,7 +719,7 @@ def interactive_mode() -> None:
             try:
                 count = build_playlist(
                     dirs, out, relative, repeat, shuffle_mode, shuffle_n,
-                    include=include, groups=groups,
+                    include=include, groups=groups, show_order=show_order,
                 )
             except Exception as e:
                 input(f"\nError generating playlist: {e}\nPress Enter...")

@@ -679,3 +679,41 @@ def test_build_playlist_group_with_repeat(tmp_path):
     g_names = [n for n in names if not n.startswith("a")]
     assert a_names == ["a01.mkv", "a02.mkv", "a03.mkv", "a04.mkv"]
     assert len(g_names) == 4  # group slot repeated 4 times
+
+
+# ---------------------------------------------------------------------------
+# Show order randomization
+# ---------------------------------------------------------------------------
+
+def test_build_playlist_random_show_order_preserves_all_episodes(tmp_path):
+    """show_order='random' still produces all episodes with no duplicates."""
+    _make_tree(tmp_path, {
+        "ShowA": ["a01.mkv", "a02.mkv"],
+        "ShowB": ["b01.mkv", "b02.mkv"],
+        "ShowC": ["c01.mkv"],
+    })
+    out = tmp_path / "out.m3u"
+    random.seed(7)
+    count = build_playlist([tmp_path], out, relative=False, show_order="random")
+    assert count == 5
+    names = {Path(p).name for p in _read_playlist_paths(out)}
+    assert names == {"a01.mkv", "a02.mkv", "b01.mkv", "b02.mkv", "c01.mkv"}
+
+
+def test_build_playlist_random_show_order_with_group(tmp_path):
+    """show_order='random' with a group still produces all episodes with no duplicates."""
+    _make_tree(tmp_path, {
+        "ShowA": ["a01.mkv", "a02.mkv", "a03.mkv"],
+        "ShowB": ["b01.mkv"],
+        "ShowC": ["c01.mkv"],
+    })
+    out = tmp_path / "out.m3u"
+    random.seed(3)
+    count = build_playlist(
+        [tmp_path], out, relative=False,
+        show_order="random",
+        groups=[["ShowB", "ShowC"]],
+    )
+    assert count == 5
+    names = {Path(p).name for p in _read_playlist_paths(out)}
+    assert names == {"a01.mkv", "a02.mkv", "a03.mkv", "b01.mkv", "c01.mkv"}
