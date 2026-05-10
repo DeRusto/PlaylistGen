@@ -50,10 +50,14 @@ def collect_show_files(show_dir: Path) -> list[Path]:
     Files are ordered by each path component naturally, so Season 2 comes
     before Season 10, and episodes within a season stay in broadcast order.
     """
-    files = [
-        f for f in show_dir.rglob("*")
-        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
-    ]
+    try:
+        files = [
+            f for f in show_dir.rglob("*")
+            if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+        ]
+    except PermissionError as e:
+        print(f"Warning: cannot read '{show_dir}': {e}", file=sys.stderr)
+        return []
     return sorted(files, key=lambda f: _path_sort_key(f, show_dir))
 
 
@@ -64,25 +68,33 @@ def collect_show_seasons(show_dir: Path) -> list[list[Path]]:
     Any video files directly in show_dir form the first group.
     For flat shows (no subdirectories), returns a single group of all episodes.
     """
-    direct = sorted(
-        [f for f in show_dir.iterdir()
-         if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS],
-        key=natural_sort_key,
-    )
-    subdirs = sorted(
-        [d for d in show_dir.iterdir() if d.is_dir()],
-        key=natural_sort_key,
-    )
+    try:
+        direct = sorted(
+            [f for f in show_dir.iterdir()
+             if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS],
+            key=natural_sort_key,
+        )
+        subdirs = sorted(
+            [d for d in show_dir.iterdir() if d.is_dir()],
+            key=natural_sort_key,
+        )
+    except PermissionError as e:
+        print(f"Warning: cannot read '{show_dir}': {e}", file=sys.stderr)
+        return []
 
     seasons: list[list[Path]] = []
     if direct:
         seasons.append(direct)
     for subdir in subdirs:
-        eps = sorted(
-            [f for f in subdir.rglob("*")
-             if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS],
-            key=lambda f, b=subdir: _path_sort_key(f, b),
-        )
+        try:
+            eps = sorted(
+                [f for f in subdir.rglob("*")
+                 if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS],
+                key=lambda f, b=subdir: _path_sort_key(f, b),
+            )
+        except PermissionError as e:
+            print(f"Warning: cannot read '{subdir}': {e}", file=sys.stderr)
+            continue
         if eps:
             seasons.append(eps)
     return seasons
@@ -169,10 +181,15 @@ def _scan_dirs(dirs: list[Path]) -> list[tuple[str, Path]]:
     raw: list[tuple[str, Path]] = []
     name_counts: dict[str, int] = {}
     for media_dir in dirs:
-        for d in sorted(
-            [x for x in media_dir.iterdir() if x.is_dir()],
-            key=lambda x: x.name.lower(),
-        ):
+        try:
+            entries = sorted(
+                [x for x in media_dir.iterdir() if x.is_dir()],
+                key=lambda x: x.name.lower(),
+            )
+        except PermissionError as e:
+            print(f"Warning: cannot read '{media_dir}': {e}", file=sys.stderr)
+            continue
+        for d in entries:
             name_counts[d.name] = name_counts.get(d.name, 0) + 1
             raw.append((d.name, d))
 
@@ -271,15 +288,19 @@ def build_playlist(
         if shuffle_mode == "episodes":
             playlist = shuffle_in_blocks(playlist, shuffle_n)
 
-    with output.open("w", encoding="utf-8") as fh:
-        fh.write("#EXTM3U\n")
-        for ep in playlist:
-            fh.write(f"#EXTINF:-1,{ep.stem}\n")
-            if relative:
-                path_str = os.path.normpath(os.path.relpath(ep, output.parent))
-            else:
-                path_str = os.path.normpath(ep)
-            fh.write(path_str + "\n")
+    try:
+        with output.open("w", encoding="utf-8") as fh:
+            fh.write("#EXTM3U\n")
+            for ep in playlist:
+                fh.write(f"#EXTINF:-1,{ep.stem}\n")
+                if relative:
+                    path_str = os.path.normpath(os.path.relpath(ep, output.parent))
+                else:
+                    path_str = os.path.normpath(ep)
+                fh.write(path_str + "\n")
+    except OSError as e:
+        print(f"Error writing playlist: {e}", file=sys.stderr)
+        return 0
 
     return len(playlist)
 
@@ -493,7 +514,11 @@ def interactive_mode() -> None:
             out = output or (dirs[0] / "interleaved.m3u")
             include = {label for label, *_ in show_info if label in selected}
             print()
-            count = build_playlist(dirs, out, relative, repeat, shuffle_mode, shuffle_n, include=include)
+            try:
+                count = build_playlist(dirs, out, relative, repeat, shuffle_mode, shuffle_n, include=include)
+            except Exception as e:
+                input(f"\nError generating playlist: {e}\nPress Enter...")
+                continue
             if count:
                 input(f"\nPlaylist written: {out}  ({count} entries)\nPress Enter...")
             else:
@@ -506,6 +531,14 @@ def interactive_mode() -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def _positive_int(value: str) -> int:
+    """argparse type that rejects non-positive integers."""
+    n = int(value)
+    if n <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {n}")
+    return n
+
 
 def main() -> None:
     if len(sys.argv) == 1:
@@ -562,8 +595,8 @@ Examples:
     )
     parser.add_argument(
         "--shuffle-n",
-        type=int,
-        default=10,
+        type=_positive_int,
+        default=None,
         metavar="N",
         help="Block size for --shuffle episodes (default: 10)",
     )
@@ -576,10 +609,17 @@ Examples:
             print(f"Error: '{d}' is not a directory.", file=sys.stderr)
             sys.exit(1)
 
+    if args.shuffle_n is not None and args.shuffle_mode != "episodes":
+        print(
+            f"Warning: --shuffle-n has no effect when --shuffle is '{args.shuffle_mode}'.",
+            file=sys.stderr,
+        )
+    shuffle_n = args.shuffle_n if args.shuffle_n is not None else 10
+
     output = args.output.resolve() if args.output else dirs[0] / "interleaved.m3u"
 
     count = build_playlist(
-        dirs, output, args.relative, args.repeat, args.shuffle_mode, args.shuffle_n
+        dirs, output, args.relative, args.repeat, args.shuffle_mode, shuffle_n
     )
     if count:
         print(f"\nPlaylist written to: {output}  ({count} entries)")

@@ -2,12 +2,15 @@
 
 import os
 import random
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from playlist_gen import (
     _natural_key,
+    _scan_dirs,
     natural_sort_key,
     collect_show_files,
     collect_show_seasons,
@@ -509,3 +512,59 @@ def test_m3u_header(tmp_path):
     out = tmp_path / "out.m3u"
     build_playlist([tmp_path], out, relative=False)
     assert out.read_text().startswith("#EXTM3U\n")
+
+
+# ---------------------------------------------------------------------------
+# Regression / edge case tests
+# ---------------------------------------------------------------------------
+
+def test_cli_shuffle_n_zero_produces_error(tmp_path):
+    """--shuffle-n 0 must fail with a clear argparse error, not a crash."""
+    _make_tree(tmp_path, {"ShowA": ["ep1.mkv"]})
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "playlist_gen.py"),
+         str(tmp_path), "--shuffle", "episodes", "--shuffle-n", "0"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "error" in combined or "invalid" in combined
+
+
+def test_scan_dirs_deduplication_suffix(tmp_path):
+    """Same show name in two source dirs gets a '(2)' suffix on the second."""
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+    (dir1 / "ShowA").mkdir()
+    (dir2 / "ShowA").mkdir()
+
+    result = _scan_dirs([dir1, dir2])
+    labels = [label for label, _ in result]
+    assert "ShowA" in labels
+    assert "ShowA (2)" in labels
+
+
+def test_collect_show_seasons_empty_season_dir_skipped(tmp_path):
+    """An empty season subdirectory is silently skipped; others are still returned."""
+    show = tmp_path / "Show"
+    show.mkdir()
+    (show / "Season 1").mkdir()          # empty — no video files
+    season2 = show / "Season 2"
+    season2.mkdir()
+    (season2 / "s02e01.mkv").write_text("")
+
+    result = collect_show_seasons(show)
+    assert len(result) == 1
+    assert result[0][0].name == "s02e01.mkv"
+
+
+def test_build_playlist_missing_output_dir_returns_zero(tmp_path, capsys):
+    """build_playlist returns 0 and prints an error when the output directory doesn't exist."""
+    _make_tree(tmp_path, {"ShowA": ["ep1.mkv"]})
+    out = tmp_path / "nonexistent_dir" / "out.m3u"
+    count = build_playlist([tmp_path], out, relative=False)
+    assert count == 0
+    captured = capsys.readouterr()
+    assert "error" in (captured.err + captured.out).lower()
