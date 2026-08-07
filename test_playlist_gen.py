@@ -795,10 +795,11 @@ def test_layout_store_save_load_delete(tmp_path):
     assert new_store.active_layout_name is None
 
 
-def test_gui_state_apply_and_extract(tmp_path):
+def test_gui_state_apply_and_extract(tmp_path, monkeypatch):
     """Test InterleaverGUI state serialization and deserialization."""
     import tkinter as tk
-    from playlist_gen import InterleaverGUI, LayoutStore
+    import playlist_gen
+    from playlist_gen import InterleaverGUI
 
     # Create fake directory structure to prevent FileNotFoundError in rescan_shows
     fake_dir = tmp_path / "fake_show_dir"
@@ -808,44 +809,51 @@ def test_gui_state_apply_and_extract(tmp_path):
         "BetterCallSaul": ["s01e01.mp4"]
     })
 
-    root = tk.Tk()
-    # Instantiate the GUI
-    # Monkeypatch LayoutStore to use a temp file during GUI initialization
-    old_layout_file = LayoutStore
-    class MockLayoutStore(LayoutStore):
-        def __init__(self, filename=tmp_path / "gui_layouts.json"):
-            super().__init__(filename=filename)
+    # Apply monkeypatch for LAYOUT_FILE override
+    monkeypatch.setattr(playlist_gen, "LAYOUT_FILE", tmp_path / "gui_layouts.json")
 
-    import playlist_gen
-    playlist_gen.LAYOUT_FILE = tmp_path / "gui_layouts.json"
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tkinter Tk cannot be initialized in headless environment")
 
-    app = InterleaverGUI(root)
+    try:
+        app = InterleaverGUI(root)
 
-    # Apply standard state
-    state = {
-        "dirs": [str(fake_dir)],
-        "selected": ["BreakingBad"],
-        "groups": [["BreakingBad"]],
-        "output_path": "/tmp/test.m3u",
-        "relative": True,
-        "repeat": True,
-        "show_order": "random",
-        "interleave_mode": "episodes",
-        "block_size": "7"
-    }
+        # Apply standard state
+        state = {
+            "dirs": [str(fake_dir)],
+            "selected": ["BreakingBad"],
+            "groups": [["BreakingBad"]],
+            "output_path": "/tmp/test.m3u",
+            "relative": True,
+            "repeat": True,
+            "show_order": "random",
+            "interleave_mode": "episodes",
+            "block_size": "7"
+        }
 
-    app.apply_state_dict(state)
+        app.apply_state_dict(state)
 
-    # Extract state from GUI and compare
-    current_state = app.get_current_state_dict()
-    assert current_state["dirs"] == [str(fake_dir)]
-    assert current_state["selected"] == ["BreakingBad"]
-    assert current_state["groups"] == [["BreakingBad"]]
-    assert current_state["output_path"] == "/tmp/test.m3u"
-    assert current_state["relative"] is True
-    assert current_state["repeat"] is True
-    assert current_state["show_order"] == "random"
-    assert current_state["interleave_mode"] == "episodes"
-    assert current_state["block_size"] == "7"
+        # Extract state from GUI and compare
+        current_state = app.get_current_state_dict()
+        assert current_state["dirs"] == [str(fake_dir)]
+        assert current_state["selected"] == ["BreakingBad"]
+        assert current_state["groups"] == [["BreakingBad"]]
+        assert current_state["output_path"] == "/tmp/test.m3u"
+        assert current_state["relative"] is True
+        assert current_state["repeat"] is True
+        assert current_state["show_order"] == "random"
+        assert current_state["interleave_mode"] == "episodes"
+        assert current_state["block_size"] == "7"
 
-    root.destroy()
+        # Regression test for layout isolation:
+        # Save the current state as a layout
+        app.store.save_layout("Mutated Layout", app.get_current_state_dict())
+        # Mutate app.groups afterward
+        app.groups.append(["MutatedGroup"])
+        # Assert get_layout returns original groups unchanged
+        saved_state = app.store.get_layout("Mutated Layout")
+        assert saved_state["groups"] == [["BreakingBad"]]
+    finally:
+        root.destroy()

@@ -8,6 +8,8 @@ Includes:
 - Tkinter GUI with robust file management and layout/state persistence (default mode with no arguments)
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -17,22 +19,27 @@ import sys
 from itertools import cycle, islice, zip_longest
 from pathlib import Path
 
-from __future__ import annotations
-
 # Tkinter imports for GUI
 try:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 except ImportError:
     tk = None  # type: ignore
-    filedialog = messagebox = ttk = None  # type: ignore
+    filedialog = None  # type: ignore
+    messagebox = None  # type: ignore
+    ttk = None  # type: ignore
 
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".m4v",
     ".mpg", ".mpeg", ".ts", ".m2ts", ".webm", ".ogv",
 }
 
-LAYOUT_FILE = Path(__file__).parent / "playlist_layouts.json"
+# LAYOUT_FILE configuration using XDG_CONFIG_HOME or standard config directory under playlist_gen/playlist_layouts.json
+_xdg_config = os.environ.get("XDG_CONFIG_HOME")
+if _xdg_config:
+    LAYOUT_FILE = Path(_xdg_config) / "playlist_gen" / "playlist_layouts.json"
+else:
+    LAYOUT_FILE = Path.home() / ".config" / "playlist_gen" / "playlist_layouts.json"
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -778,8 +785,8 @@ def interactive_mode() -> None:
 # ---------------------------------------------------------------------------
 
 class LayoutStore:
-    def __init__(self, filename: Path = LAYOUT_FILE):
-        self.filename = filename
+    def __init__(self, filename: Path | None = None):
+        self.filename = filename if filename is not None else LAYOUT_FILE
         self.layouts: dict[str, dict] = {}
         self.active_layout_name: str | None = None
         self.load_all()
@@ -789,9 +796,12 @@ class LayoutStore:
             try:
                 with self.filename.open("r", encoding="utf-8") as f:
                     data = json.load(f)
+                if isinstance(data, dict):
                     self.layouts = data.get("layouts", {})
                     self.active_layout_name = data.get("active_layout_name", None)
-            except Exception as e:
+                else:
+                    raise ValueError("Root JSON is not a dictionary")
+            except (OSError, json.JSONDecodeError, ValueError) as e:
                 print(f"Warning: Failed to load layouts from {self.filename}: {e}", file=sys.stderr)
                 self.layouts = {}
                 self.active_layout_name = None
@@ -799,30 +809,37 @@ class LayoutStore:
             self.layouts = {}
             self.active_layout_name = None
 
-    def save_all(self):
+    def save_all(self) -> bool:
         try:
-            with self.filename.open("w", encoding="utf-8") as f:
+            self.filename.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.filename.with_suffix(".tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
                 json.dump({
                     "layouts": self.layouts,
                     "active_layout_name": self.active_layout_name
                 }, f, indent=2)
+            os.replace(tmp_path, self.filename)
+            return True
         except Exception as e:
             print(f"Error: Failed to save layouts to {self.filename}: {e}", file=sys.stderr)
+            return False
 
     def get_layout(self, name: str) -> dict | None:
         return self.layouts.get(name, None)
 
-    def save_layout(self, name: str, state: dict):
-        self.layouts[name] = state
+    def save_layout(self, name: str, state: dict) -> bool:
+        import copy
+        self.layouts[name] = copy.deepcopy(state)
         self.active_layout_name = name
-        self.save_all()
+        return self.save_all()
 
-    def delete_layout(self, name: str):
+    def delete_layout(self, name: str) -> bool:
         if name in self.layouts:
             del self.layouts[name]
             if self.active_layout_name == name:
                 self.active_layout_name = list(self.layouts.keys())[0] if self.layouts else None
-            self.save_all()
+            return self.save_all()
+        return False
 
     def get_active_state(self) -> dict | None:
         if self.active_layout_name and self.active_layout_name in self.layouts:
@@ -868,7 +885,7 @@ class InterleaverGUI:
         return {
             "dirs": [str(d) for d in self.dirs],
             "selected": list(self.selected),
-            "groups": self.groups,
+            "groups": [list(g) for g in self.groups],
             "output_path": self.output_path_var.get(),
             "relative": self.relative_var.get(),
             "repeat": self.repeat_var.get(),
@@ -1076,7 +1093,7 @@ class InterleaverGUI:
         self.status_label = ttk.Label(footer_frame, text="Ready", font=("TkDefaultFont", 10, "italic"))
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        generate_btn = ttk.Button(footer_frame, text="Generate Playlist", style="Accent.TButton", command=self.generate_playlist)
+        generate_btn = ttk.Button(footer_frame, text="Generate Playlist", style="TButton", command=self.generate_playlist)
         generate_btn.pack(side=tk.RIGHT, padx=5, ipady=5)
 
     def _update_block_size_entry_state(self):
@@ -1093,11 +1110,11 @@ class InterleaverGUI:
     def _refresh_shows_treeview(self):
         # Save active focus/selection names if possible
         selected_items = self.shows_tree.selection()
-        selected_names = [
-            vals[1]
-            for item in selected_items
-            if (vals := self.shows_tree.item(item, "values")) and len(vals) > 1
-        ]
+        selected_names = []
+        for item in selected_items:
+            vals = self.shows_tree.item(item, "values")
+            if vals and len(vals) > 1:
+                selected_names.append(vals[1])
 
         # Clear
         for item in self.shows_tree.get_children():
@@ -1213,6 +1230,14 @@ class InterleaverGUI:
         self._refresh_shows_treeview()
         self.set_status(f"Created group with {len(labels)} shows.")
 
+    def _get_group_choices(self) -> list[str]:
+        choices = []
+        for i, g in enumerate(self.groups):
+            name_part = ", ".join(g[:3])
+            suffix = "..." if len(g) > 3 else ""
+            choices.append(f"Group {i+1} ({name_part}{suffix})")
+        return choices
+
     def add_selected_to_group(self):
         labels = self.get_selected_show_labels()
         if not labels:
@@ -1240,7 +1265,7 @@ class InterleaverGUI:
 
         ttk.Label(group_sel_win, text="Select existing group:").pack(pady=5)
 
-        group_choices = [f"Group {i+1} ({', '.join(g[:3])}...)" for i, g in enumerate(self.groups)]
+        group_choices = self._get_group_choices()
         combo = ttk.Combobox(group_sel_win, values=group_choices, state="readonly")
         combo.pack(pady=10, fill=tk.X, padx=10)
         combo.current(0)
@@ -1248,15 +1273,23 @@ class InterleaverGUI:
         def confirm():
             g_idx = combo.current()
             if g_idx >= 0:
-                # Remove from previous groups
-                self.groups = [[lbl for lbl in g if lbl not in labels] for g in self.groups]
-                self.groups = [g for g in self.groups if g]
+                target_group = self.groups[g_idx] if g_idx < len(self.groups) else None
+
+                # Remove labels from other groups in-place to preserve target_group identity
+                for g in list(self.groups):
+                    for lbl in list(g):
+                        if lbl in labels:
+                            g.remove(lbl)
+                    if not g:
+                        self.groups.remove(g)
 
                 # Append
-                if g_idx < len(self.groups):
+                if target_group is not None:
+                    if target_group not in self.groups:
+                        self.groups.append(target_group)
                     for lbl in labels:
-                        if lbl not in self.groups[g_idx]:
-                            self.groups[g_idx].append(lbl)
+                        if lbl not in target_group:
+                            target_group.append(lbl)
                 else:
                     self.groups.append(labels)
 
@@ -1290,7 +1323,7 @@ class InterleaverGUI:
 
         ttk.Label(group_sel_win, text="Select group to dissolve:").pack(pady=5)
 
-        group_choices = [f"Group {i+1} ({', '.join(g[:3])}...)" for i, g in enumerate(self.groups)]
+        group_choices = self._get_group_choices()
         combo = ttk.Combobox(group_sel_win, values=group_choices, state="readonly")
         combo.pack(pady=10, fill=tk.X, padx=10)
         combo.current(0)
@@ -1344,31 +1377,41 @@ class InterleaverGUI:
 
         include = {lbl for lbl, *_ in self.show_info if lbl in self.selected}
 
-        try:
-            self.set_status("Generating playlist...")
-            self.root.update_idletasks()
-            count = build_playlist(
-                dirs=self.dirs,
-                output=output,
-                relative=self.relative_var.get(),
-                repeat=self.repeat_var.get(),
-                interleave_mode=self.interleave_mode_var.get(),
-                block_size=block_size,
-                include=include,
-                groups=self.groups,
-                show_order=self.show_order_var.get(),
-            )
-        except Exception as e:
-            messagebox.showerror("Generation Error", f"An error occurred during playlist generation:\n{e}")
-            self.set_status("Generation failed.")
-            return
+        self.set_status("Generating playlist...")
+        self.root.update_idletasks()
 
+        import threading
+
+        def worker():
+            try:
+                count = build_playlist(
+                    dirs=self.dirs,
+                    output=output,
+                    relative=self.relative_var.get(),
+                    repeat=self.repeat_var.get(),
+                    interleave_mode=self.interleave_mode_var.get(),
+                    block_size=block_size,
+                    include=include,
+                    groups=self.groups,
+                    show_order=self.show_order_var.get(),
+                )
+                self.root.after(0, lambda: self._generation_done(output, count))
+            except Exception as e:
+                self.root.after(0, lambda: self._generation_failed(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _generation_done(self, output: Path, count: int):
         if count > 0:
             messagebox.showinfo("Success", f"Playlist generated successfully!\nPath: {output}\nEntries: {count}")
             self.set_status(f"Generated {count} entries into: {output.name}")
         else:
             messagebox.showwarning("No Playlist Generated", "No video files were found matching your parameters.")
             self.set_status("No playlist generated.")
+
+    def _generation_failed(self, error: Exception):
+        messagebox.showerror("Generation Error", f"An error occurred during playlist generation:\n{error}")
+        self.set_status("Generation failed.")
 
     # --- Layout State Operations ---
 
@@ -1396,8 +1439,11 @@ class InterleaverGUI:
     def save_layout(self):
         name = self.store.active_layout_name
         if name:
-            self.store.save_layout(name, self.get_current_state_dict())
-            self.set_status(f"Saved layout: {name}")
+            if self.store.save_layout(name, self.get_current_state_dict()):
+                self.set_status(f"Saved layout: {name}")
+            else:
+                messagebox.showerror("Error", f"Failed to save layout: {name}")
+                self.set_status("Save failed.")
         else:
             self.save_layout_as()
 
@@ -1421,10 +1467,16 @@ class InterleaverGUI:
         def confirm():
             name = name_entry.get().strip()
             if name:
-                self.store.save_layout(name, self.get_current_state_dict())
-                self._update_window_title()
-                self.set_status(f"Saved layout: {name}")
-                save_win.destroy()
+                if name in self.store.layouts:
+                    if not messagebox.askyesno("Confirm Overwrite", f"Layout '{name}' already exists. Overwrite?"):
+                        return
+                if self.store.save_layout(name, self.get_current_state_dict()):
+                    self._update_window_title()
+                    self.set_status(f"Saved layout: {name}")
+                    save_win.destroy()
+                else:
+                    messagebox.showerror("Error", f"Failed to save layout: {name}")
+                    self.set_status("Save failed.")
             else:
                 messagebox.showwarning("Name Required", "Please enter a valid layout name.")
 
@@ -1529,19 +1581,9 @@ def _positive_int(value: str) -> int:
 
 
 def main() -> None:
-    # 1. Check for command line arguments
     # No arguments -> GUI
-    # If '--text' is present -> launch Text Menu
-    # If media directories are given -> CLI Mode as before
-
     if len(sys.argv) == 1:
         launch_gui()
-        return
-
-    # Check for '--text' parameter specifically
-    if "--text" in sys.argv:
-        # Run text interactive mode
-        interactive_mode()
         return
 
     parser = argparse.ArgumentParser(
@@ -1557,9 +1599,14 @@ Examples:
 """,
     )
     parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Launch the interactive text menu",
+    )
+    parser.add_argument(
         "media_dirs",
         type=Path,
-        nargs="+",
+        nargs="*",
         metavar="media_dir",
         help="One or more directories containing TV show subdirectories",
     )
@@ -1601,6 +1648,13 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    if args.text:
+        interactive_mode()
+        return
+
+    if not args.media_dirs:
+        parser.error("the following arguments are required: media_dir")
 
     dirs = [d.resolve() for d in args.media_dirs]
     for d in dirs:
