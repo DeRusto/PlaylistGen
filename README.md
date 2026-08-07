@@ -12,60 +12,53 @@ ShowB/  b1 b2 b3 b4 b5 b6 b7
 ## Requirements
 
 - Python 3.11+
-- No third-party dependencies
+- No third-party dependencies (built entirely using Python's standard library, including Tkinter)
 
-## Usage
+## Launch Modes
 
-Run with no arguments to launch the interactive menu:
+The application automatically dispatches to the correct interface based on your command-line arguments:
 
-```bash
-python playlist_gen.py
-```
-
-Or pass arguments directly for a one-shot CLI run:
-
-```bash
-python playlist_gen.py <media_dir> [options]
-```
-
-### CLI Arguments
-
-| Argument | Description |
-|---|---|
-| `media_dir` | One or more directories containing TV show subdirectories |
-| `-o`, `--output` | Output file path (default: `<first media_dir>/interleaved.m3u`) |
-| `--relative` | Write relative paths instead of absolute paths |
-| `--repeat` | Cycle shorter shows back to episode 1 instead of leaving gaps |
-| `--interleave` | `episodes` or `seasons` (see Interleave modes below) |
-| `--block-size N` | Episodes per show per round for `--interleave episodes` (default: 10) |
-
-### CLI Examples
-
-```bash
-# Basic — writes interleaved.m3u into the media directory
-python playlist_gen.py /media/tv
-
-# Multiple source directories
-python playlist_gen.py /media/tv1 /media/tv2 -o ~/combined.m3u
-
-# Relative paths (useful when the playlist lives alongside the media)
-python playlist_gen.py /media/tv --relative
-
-# Repeat shorter shows so every slot is filled
-python playlist_gen.py /media/tv --repeat
-
-# Watch 5 episodes of each show before switching
-python playlist_gen.py /media/tv --interleave episodes --block-size 5
-
-# Watch one full season of each show before switching
-python playlist_gen.py /media/tv --interleave seasons
-```
+1. **GUI Application (Default)**: Run with no arguments to launch the brand-new desktop interface:
+   ```bash
+   python playlist_gen.py
+   ```
+2. **One-Shot CLI**: Pass source directories to run directly from the command line:
+   ```bash
+   python playlist_gen.py <media_dir> [options]
+   ```
+3. **Interactive Text Menu**: Pass the `--text` flag to run the console-based menu:
+   ```bash
+   python playlist_gen.py --text
+   ```
 
 ---
 
-## Interactive Menu
+## Desktop GUI Application
 
-Run with no arguments to enter the interactive menu. All features are available here, including show selection, groups, and show-order randomization.
+The Tkinter-based desktop interface provides an intuitive and robust toolset to configure and generate playlists:
+
+- **Source Directory Manager**: Add or remove multiple source directories via an integrated folder browser. Added folders are scanned immediately.
+- **Show Treeview**: Lists all discovered shows with their checkbox select status, names, active groups, season count, and episode count. Double-click or press space to toggle a show's inclusion.
+- **Interactive Group Management**: Bundles multiple shows into custom round-robin slots with actions to create, add to, remove from, or dissolve groups.
+- **Settings Panel**: Live controls for Path style (absolute vs. relative), Repeating shorter shows, Show order (alphabetical vs. random), Interleave Mode, Block Size, and Output Playlist file path.
+- **Asynchronous Generation**: The playlist is built in a background worker thread so the GUI remains highly responsive. Progress and final statistics are shown via status logs and popups.
+
+### Layout State & Persistence
+
+Your configuration is preserved between sessions automatically in `playlist_layouts.json` (saved inside your user config directory, resolving to `$XDG_CONFIG_HOME/playlist_gen/` or `~/.config/playlist_gen/`).
+
+Use the **File Menu** to manage named layouts:
+- **New Layout**: Resets the current configuration.
+- **Save Layout**: Overwrites the active named layout.
+- **Save Layout As...**: Creates a new custom layout name (with duplicate-name overwrite warnings).
+- **Load Layout...**: Switches between your saved layouts.
+- **Delete Layout...**: Permanently removes a layout definition.
+
+---
+
+## Interactive Text Menu
+
+Run with `python playlist_gen.py --text` to enter the interactive console menu:
 
 ```
 ======================================================
@@ -98,70 +91,41 @@ Commands:
   [q] Quit
 ```
 
-### Main menu commands
+---
 
-| Key | Action |
+## CLI Arguments
+
+| Argument | Description |
 |---|---|
-| `a` | Add a source directory (scanned immediately) |
-| `x` | Remove a source directory |
-| `w` | Open the show selection screen |
-| `G` | Open the group management screen |
-| `o` | Set a custom output file path |
-| `p` | Toggle between absolute and relative paths |
-| `r` | Toggle repeat mode (cycle shorter shows) |
-| `n` | Toggle show order (alphabetical / random) |
-| `s` | Set interleave mode |
-| `g` | Generate the playlist |
-| `q` | Quit |
+| `--text` | Launch the interactive text menu instead of the GUI |
+| `media_dirs` | One or more directories containing TV show subdirectories |
+| `-o`, `--output` | Output file path (default: `<first media_dir>/interleaved.m3u`) |
+| `--relative` | Write relative paths instead of absolute paths |
+| `--repeat` | Cycle shorter shows back to episode 1 instead of leaving gaps |
+| `--interleave` | `episodes` or `seasons` (see Interleave modes below) |
+| `--block-size N` | Episodes per show per round for `--interleave episodes` (default: 10) |
 
-### Show selection (`w`)
+### CLI Examples
 
-Lists every show found across all source directories with its season and episode counts. Enter show numbers to toggle them in or out of the playlist. Multiple numbers can be entered at once separated by spaces or commas.
+```bash
+# Basic — writes interleaved.m3u into the media directory
+python playlist_gen.py /media/tv
 
+# Multiple source directories
+python playlist_gen.py /media/tv1 /media/tv2 -o ~/combined.m3u
+
+# Relative paths (useful when the playlist lives alongside the media)
+python playlist_gen.py /media/tv --relative
+
+# Repeat shorter shows so every slot is filled
+python playlist_gen.py /media/tv --repeat
+
+# Watch 5 episodes of each show before switching
+python playlist_gen.py /media/tv --interleave episodes --block-size 5
+
+# Watch one full season of each show before switching
+python playlist_gen.py /media/tv --interleave seasons
 ```
-  [✓]  1. Breaking Bad        5 seasons  62 eps
-  [ ]  2. Firefly             1 season   14 eps
-  [✓]  3. Game of Thrones     8 seasons  73 eps
-```
-
-| Command | Action |
-|---|---|
-| `1 3 5` | Toggle shows 1, 3, and 5 |
-| `a` | Select all shows |
-| `n` | Deselect all shows |
-| `b` | Back to main menu |
-
-### Group management (`G`)
-
-Groups bundle multiple shows into a single round-robin slot. The grouped shows play sequentially inside that slot (all of show B, then all of show C), so their combined episode count competes against longer shows without excessive repetition.
-
-**Example:** Game of Thrones (73 eps) vs a group of [Firefly (14 eps) + Freaks and Geeks (18 eps)] = 32 combined episodes. Instead of repeating the short shows 5× each, they form one slot and play straight through.
-
-```
-  ●   1. Breaking Bad      5 seasons  62 eps
-  G1  2. Firefly           1 season   14 eps
-  G1  3. Freaks and Geeks  1 season   18 eps
-  ●   4. Game of Thrones   8 seasons  73 eps
-  G2  5. Mr. Robot         1 season   10 eps
-```
-
-| Command | Action |
-|---|---|
-| `g 2 3` | Create a new group from shows 2 and 3 |
-| `g 2 3 5` | Create a new group from shows 2, 3, and 5 |
-| `a 1 5` | Add show 5 to existing Group 1 |
-| `r 2` | Remove show 2 from its group (back to solo) |
-| `d 1` | Delete Group 1 entirely (all its shows return to solo) |
-| `b` | Back to main menu |
-
-Multiple groups are supported (Group 1, Group 2, …). A show can only belong to one group at a time.
-
-### Show order (`n`)
-
-Toggles between:
-
-- **Alphabetical** (default) — shows and groups always appear in the same round-robin positions, determined by their names.
-- **Random** — at each generate, the round-robin slot positions are reshuffled. When groups are defined, the playback order of shows within each group is also reshuffled.
 
 ---
 
@@ -227,7 +191,7 @@ ShowB (2 eps):  b1 b2
 
 ## Interleave modes
 
-The interleave mode controls how many episodes of each show play before the next show takes its turn. Configured via `--interleave` (CLI) or `[s]` (interactive menu).
+The interleave mode controls how many episodes of each show play before the next show takes its turn. Configured via `--interleave` (CLI), `[s]` (interactive menu), or the Interleave combobox (GUI).
 
 ### Default — 1 episode per show
 
@@ -276,7 +240,14 @@ When `--repeat` is on and a show runs out of seasons, its earlier seasons are cy
 
 ## Running tests
 
+To run the unit tests (including persistent layout states and GUI deserialization tests):
+
 ```bash
 pip install pytest
-python -m pytest test_playlist_gen.py -v
+```
+
+If you are running in a headless Linux environment, use `xvfb-run` to emulate a virtual display for Tkinter:
+
+```bash
+xvfb-run python3 -m pytest test_playlist_gen.py -v
 ```
