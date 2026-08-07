@@ -1386,6 +1386,7 @@ class InterleaverGUI:
         self.block_size_var.set("10")
 
         self.store.active_layout_name = None
+        self.store.save_all()
         self._refresh_dirs_listbox()
         self._refresh_shows_treeview()
         self._update_block_size_entry_state()
