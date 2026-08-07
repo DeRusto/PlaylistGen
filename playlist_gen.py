@@ -17,12 +17,15 @@ import sys
 from itertools import cycle, islice, zip_longest
 from pathlib import Path
 
+from __future__ import annotations
+
 # Tkinter imports for GUI
 try:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 except ImportError:
     tk = None  # type: ignore
+    filedialog = messagebox = ttk = None  # type: ignore
 
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".m4v",
