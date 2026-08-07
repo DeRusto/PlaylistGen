@@ -88,8 +88,8 @@ def collect_show_files(show_dir: Path | list[Path]) -> list[Path]:
                 all_files.append((f, _path_sort_key(f, d)))
         except PermissionError as e:
             print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
 
     sorted_files = [item[0] for item in sorted(all_files, key=lambda x: x[1])]
     return sorted_files
@@ -117,21 +117,30 @@ def collect_show_seasons(show_dir: Path | list[Path]) -> list[list[Path]]:
             all_direct.extend(direct)
         except PermissionError as e:
             print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
 
     all_direct_sorted = sorted(all_direct, key=natural_sort_key)
 
     subdirs_by_name: dict[str, list[Path]] = {}
+    lower_to_display: dict[str, str] = {}
+
     for d in dirs:
         try:
             for item in d.iterdir():
                 if item.is_dir():
-                    subdirs_by_name.setdefault(item.name, []).append(item)
+                    norm_subdir_name = item.name.lower()
+                    if norm_subdir_name in lower_to_display:
+                        display_name = lower_to_display[norm_subdir_name]
+                        subdirs_by_name[display_name].append(item)
+                    else:
+                        display_name = item.name
+                        lower_to_display[norm_subdir_name] = display_name
+                        subdirs_by_name[display_name] = [item]
         except PermissionError as e:
             print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
 
     sorted_names = sorted(subdirs_by_name.keys(), key=_natural_key)
 
@@ -153,8 +162,8 @@ def collect_show_seasons(show_dir: Path | list[Path]) -> list[list[Path]]:
             except PermissionError as e:
                 print(f"Warning: cannot read '{subdir}': {e}", file=sys.stderr)
                 continue
-            except OSError:
-                pass
+            except OSError as e:
+                print(f"Warning: cannot read '{subdir}': {e}", file=sys.stderr)
 
         if season_eps:
             sorted_eps = [item[0] for item in sorted(season_eps, key=lambda x: x[1])]
@@ -254,11 +263,12 @@ ShowInfo = tuple[str, Path, int, int]
 def _scan_dirs(dirs: list[Path]) -> list[tuple[str, Path | list[Path]]]:
     """Scan each media dir for show subdirectories, returning (label, path_or_paths) pairs.
 
-    If the same show name appears in more than one source dir, we merge their contents
-    and treat them as a single show. All shows are sorted alphabetically globally across
-    all included directories.
+    Case-insensitive grouping is used while preserving the first-seen casing.
+    All shows are sorted alphabetically globally across all included directories.
     """
     shows_map: dict[str, list[Path]] = {}
+    lower_to_display: dict[str, str] = {}
+
     for media_dir in dirs:
         try:
             entries = [x for x in media_dir.iterdir() if x.is_dir()]
@@ -266,15 +276,14 @@ def _scan_dirs(dirs: list[Path]) -> list[tuple[str, Path | list[Path]]]:
             print(f"Warning: cannot read '{media_dir}': {e}", file=sys.stderr)
             continue
         for d in entries:
-            # Case-insensitive grouping but preserve original casing of first found or preferred
-            # Let's group by lower name but keep the key as the first seen casing
-            key = d.name
-            # To preserve exact casing if possible, find existing key
-            existing_key = next((k for k in shows_map if k.lower() == key.lower()), None)
-            if existing_key:
-                shows_map[existing_key].append(d)
+            norm_name = d.name.lower()
+            if norm_name in lower_to_display:
+                display_key = lower_to_display[norm_name]
+                shows_map[display_key].append(d)
             else:
-                shows_map[key] = [d]
+                display_key = d.name
+                lower_to_display[norm_name] = display_key
+                shows_map[display_key] = [d]
 
     sorted_keys = sorted(shows_map.keys(), key=lambda s: s.lower())
 
@@ -737,16 +746,28 @@ def interactive_mode() -> None:
     # Try loading active state or first available layout state
     state = store.get_active_state()
     if not state and store.layouts:
-        state = list(store.layouts.values())[0]
+        state = next(iter(store.layouts.values()))
 
     if state:
-        dirs = [Path(d) for d in state.get("dirs", [])]
+        raw_dirs = state.get("dirs", [])
+        if isinstance(raw_dirs, list):
+            dirs = [Path(d) for d in raw_dirs if d]
+        else:
+            dirs = []
         out_str = state.get("output_path", "")
         output = Path(out_str).expanduser().resolve() if out_str else None
         relative = state.get("relative", False)
         repeat = state.get("repeat", False)
         interleave_mode = state.get("interleave_mode", "none")
-        block_size = int(state.get("block_size", "10"))
+
+        raw_block_size = state.get("block_size", "10")
+        if raw_block_size is None or str(raw_block_size).strip() == "" or not str(raw_block_size).strip().isdigit():
+            block_size = 10
+        else:
+            block_size = int(raw_block_size)
+            if block_size <= 0:
+                block_size = 10
+
         show_order = state.get("show_order", "alpha")
 
     # Perform initial rescan
@@ -765,7 +786,7 @@ def interactive_mode() -> None:
         selected = all_show_labels
 
     def save_state() -> None:
-        name = store.active_layout_name or "Last Session State"
+        name = store.active_layout_name
         state_dict = {
             "dirs": [str(d) for d in dirs],
             "selected": list(selected),
@@ -777,7 +798,10 @@ def interactive_mode() -> None:
             "interleave_mode": interleave_mode,
             "block_size": str(block_size),
         }
-        store.save_layout(name, state_dict)
+        if name:
+            store.save_layout(name, state_dict)
+        else:
+            store.autosave_session(state_dict)
 
     def rescan() -> None:
         nonlocal show_info, selected, groups
@@ -816,6 +840,7 @@ def interactive_mode() -> None:
                 show_info = []
                 selected = set()
                 groups = []
+                save_state()
             else:
                 _clear()
                 print("Remove which directory?\n")
@@ -932,6 +957,11 @@ class LayoutStore:
         self.active_layout_name = name
         return self.save_all()
 
+    def autosave_session(self, state: dict) -> bool:
+        import copy
+        self.layouts["Last Session State"] = copy.deepcopy(state)
+        return self.save_all()
+
     def delete_layout(self, name: str) -> bool:
         if name in self.layouts:
             del self.layouts[name]
@@ -959,6 +989,7 @@ class InterleaverGUI:
 
         # Guard against auto-saving while we are applying or loading state
         self._loading_state = True
+        self._pending_auto_save_id = None
 
         # Initialize layout state variables
         self.dirs: list[Path] = []
@@ -993,7 +1024,9 @@ class InterleaverGUI:
         # Trace changes to settings variables
         def trigger_auto_save(*args):
             if not self._loading_state:
-                self.auto_save()
+                if self._pending_auto_save_id is not None:
+                    self.root.after_cancel(self._pending_auto_save_id)
+                self._pending_auto_save_id = self.root.after(500, self._flush_auto_save)
 
         self.output_path_var.trace_add("write", trigger_auto_save)
         self.relative_var.trace_add("write", trigger_auto_save)
@@ -1005,15 +1038,24 @@ class InterleaverGUI:
         # Done loading
         self._loading_state = False
 
+    def _flush_auto_save(self):
+        if self._pending_auto_save_id is not None:
+            self.root.after_cancel(self._pending_auto_save_id)
+            self._pending_auto_save_id = None
+        self.auto_save()
+
     def on_close(self):
         # Save layout before leaving
-        self.auto_save()
+        self._flush_auto_save()
         self.root.destroy()
 
     def auto_save(self):
-        # Saves to active layout if loaded, otherwise to "Last Session State" or standard default
-        name = self.store.active_layout_name or "Last Session State"
-        self.store.save_layout(name, self.get_current_state_dict())
+        # Saves to active layout if loaded, otherwise writes to the fixed session slot
+        name = self.store.active_layout_name
+        if name:
+            self.store.save_layout(name, self.get_current_state_dict())
+        else:
+            self.store.autosave_session(self.get_current_state_dict())
 
     def get_current_state_dict(self) -> dict:
         return {
@@ -1085,7 +1127,7 @@ class InterleaverGUI:
         filemenu.add_command(label="Load Layout...", command=self.load_layout)
         filemenu.add_command(label="Delete Layout...", command=self.delete_layout)
         filemenu.add_separator()
-        filemenu.add_command(label="Exit", command=self.root.quit)
+        filemenu.add_command(label="Exit", command=self.on_close)
         menubar.add_cascade(label="File", menu=filemenu)
 
         self.root.config(menu=menubar)

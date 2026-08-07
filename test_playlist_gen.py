@@ -552,6 +552,24 @@ def test_scan_dirs_merged_across_directories(tmp_path):
     assert set(paths) == {show1, show2}
 
 
+def test_scan_dirs_case_insensitive_merging(tmp_path):
+    """ShowA and showa in separate source directories get merged under the first-seen casing 'ShowA'."""
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+    show1 = dir1 / "ShowA"
+    show1.mkdir()
+    show2 = dir2 / "showa"
+    show2.mkdir()
+
+    result = _scan_dirs([dir1, dir2])
+    assert len(result) == 1
+    label, paths = result[0]
+    assert label == "ShowA"
+    assert set(paths) == {show1, show2}
+
+
 def test_collect_show_seasons_empty_season_dir_skipped(tmp_path):
     """An empty season subdirectory is silently skipped; others are still returned."""
     show = tmp_path / "Show"
@@ -607,13 +625,23 @@ def test_tui_state_persistence_loading_and_saving(tmp_path, monkeypatch):
     layout_file = tmp_path / "tui_layouts.json"
     monkeypatch.setattr(playlist_gen, "LAYOUT_FILE", layout_file)
 
-    # Pre-save some state
+    # Let's mock os.system to a no-op so it doesn't run 'clear'
+    monkeypatch.setattr(playlist_gen, "_clear", lambda: None)
+
+    # Let's create mock source directories under tmp_path
+    mock_media_dir = tmp_path / "mock_media"
+    mock_media_dir.mkdir()
+    show_a = mock_media_dir / "ShowA"
+    show_a.mkdir()
+    (show_a / "ep1.mkv").write_text("")
+
+    # Pre-save state in the JSON store
     store = LayoutStore(filename=layout_file)
     test_state = {
-        "dirs": ["/tmp/tui_test"],
+        "dirs": [str(mock_media_dir)],
         "selected": ["ShowA"],
         "groups": [["ShowA"]],
-        "output_path": "/tmp/tui_out.m3u",
+        "output_path": str(tmp_path / "tui_out.m3u"),
         "relative": True,
         "repeat": True,
         "show_order": "random",
@@ -622,12 +650,29 @@ def test_tui_state_persistence_loading_and_saving(tmp_path, monkeypatch):
     }
     store.save_layout("Last Session State", test_state)
 
-    # Let's verify our monkeypatched config/state loads and reads
+    # Mock input to return "q" (which triggers SystemExit)
+    input_calls = []
+    def mock_input(prompt=""):
+        input_calls.append(prompt)
+        return "q"
+    monkeypatch.setattr("builtins.input", mock_input)
+
+    # Run interactive_mode — it should load layout, print menu, and quit immediately upon seeing "q"
+    with pytest.raises(SystemExit):
+        interactive_mode()
+
+    # Verify that the state was correctly loaded (since "Last Session State" is parsed,
+    # and "Last Session State" gets updated/saved or kept)
     new_store = LayoutStore(filename=layout_file)
-    assert new_store.active_layout_name == "Last Session State"
     active_state = new_store.get_active_state()
+    assert active_state is not None
     assert active_state["relative"] is True
     assert active_state["repeat"] is True
+    assert active_state["interleave_mode"] == "seasons"
+    assert active_state["block_size"] == "5"
+    assert "ShowA" in active_state["selected"]
+    assert active_state["groups"] == [["ShowA"]]
+    assert active_state["dirs"] == [str(mock_media_dir)]
 
 
 def test_build_playlist_missing_output_dir_returns_zero(tmp_path, capsys):
