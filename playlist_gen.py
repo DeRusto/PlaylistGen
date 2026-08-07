@@ -1093,7 +1093,11 @@ class InterleaverGUI:
     def _refresh_shows_treeview(self):
         # Save active focus/selection names if possible
         selected_items = self.shows_tree.selection()
-        selected_names = [self.shows_tree.item(item, "values")[1] for item in selected_items]
+        selected_names = [
+            vals[1]
+            for item in selected_items
+            if (vals := self.shows_tree.item(item, "values")) and len(vals) > 1
+        ]
 
         # Clear
         for item in self.shows_tree.get_children():
