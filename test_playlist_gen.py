@@ -18,7 +18,6 @@ from playlist_gen import (
     collect_show_seasons,
     interleave,
     interleave_in_blocks,
-    shuffle_in_blocks,
     interleave_by_season,
     build_playlist,
 )
@@ -251,39 +250,6 @@ def test_interleave_repeat_single_show():
     assert interleave([["x1", "x2"]], repeat=True) == ["x1", "x2"]
 
 
-# ---------------------------------------------------------------------------
-# shuffle_in_blocks
-# ---------------------------------------------------------------------------
-
-def test_shuffle_in_blocks_preserves_all_items():
-    eps = [Path(f"ep{i:02d}.mkv") for i in range(9)]
-    random.seed(0)
-    result = shuffle_in_blocks(eps, 3)
-    assert len(result) == 9
-    assert set(result) == set(eps)
-
-
-def test_shuffle_in_blocks_respects_boundaries():
-    eps = [Path(f"ep{i:02d}.mkv") for i in range(6)]
-    random.seed(0)
-    result = shuffle_in_blocks(eps, 3)
-    # Each half must still be contained within its block boundary
-    assert set(result[:3]) == {Path("ep00.mkv"), Path("ep01.mkv"), Path("ep02.mkv")}
-    assert set(result[3:]) == {Path("ep03.mkv"), Path("ep04.mkv"), Path("ep05.mkv")}
-
-
-def test_shuffle_in_blocks_partial_last_block():
-    eps = [Path(f"ep{i:02d}.mkv") for i in range(5)]
-    random.seed(0)
-    result = shuffle_in_blocks(eps, 3)
-    assert len(result) == 5
-    assert set(result) == set(eps)
-
-
-def test_shuffle_in_blocks_size_one_is_noop():
-    eps = [Path(f"ep{i:02d}.mkv") for i in range(4)]
-    result = shuffle_in_blocks(eps, 1)
-    assert result == eps
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +449,9 @@ def test_build_multiple_dirs_duplicate_show_names(tmp_path):
     out = tmp_path / "out.m3u"
     count = build_playlist([dir1, dir2], out, relative=False)
 
-    assert count == 2  # both episodes included, despite same show name
+    assert count == 2  # both episodes included because they are merged as one show
+    names = [Path(p).name for p in _read_playlist_paths(out)]
+    assert names == ["a01.mkv", "a02.mkv"]
 
 
 def test_build_shuffle_episodes_block_order(tmp_path):
@@ -566,19 +534,22 @@ def test_cli_block_size_zero_produces_error(tmp_path):
     assert "error" in combined or "invalid" in combined
 
 
-def test_scan_dirs_deduplication_suffix(tmp_path):
-    """Same show name in two source dirs gets a '(2)' suffix on the second."""
+def test_scan_dirs_merged_across_directories(tmp_path):
+    """Same show name in two source dirs gets merged as one show and lists both paths."""
     dir1 = tmp_path / "dir1"
     dir2 = tmp_path / "dir2"
     dir1.mkdir()
     dir2.mkdir()
-    (dir1 / "ShowA").mkdir()
-    (dir2 / "ShowA").mkdir()
+    show1 = dir1 / "ShowA"
+    show1.mkdir()
+    show2 = dir2 / "ShowA"
+    show2.mkdir()
 
     result = _scan_dirs([dir1, dir2])
-    labels = [label for label, _ in result]
-    assert "ShowA" in labels
-    assert "ShowA (2)" in labels
+    assert len(result) == 1
+    label, paths = result[0]
+    assert label == "ShowA"
+    assert set(paths) == {show1, show2}
 
 
 def test_collect_show_seasons_empty_season_dir_skipped(tmp_path):
@@ -593,6 +564,70 @@ def test_collect_show_seasons_empty_season_dir_skipped(tmp_path):
     result = collect_show_seasons(show)
     assert len(result) == 1
     assert result[0][0].name == "s02e01.mkv"
+
+
+def test_scan_dirs_global_alphabetical_order(tmp_path):
+    """Shows are sorted alphabetically globally across all added directories."""
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+    (dir2 / "ShowA").mkdir()
+    (dir1 / "ShowZ").mkdir()
+    (dir2 / "ShowM").mkdir()
+
+    result = _scan_dirs([dir1, dir2])
+    labels = [label for label, _ in result]
+    assert labels == ["ShowA", "ShowM", "ShowZ"]
+
+
+def test_collect_show_seasons_merged_directories(tmp_path):
+    """Test collect_show_seasons merges duplicate shows across directories correctly."""
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+    show1 = dir1 / "ShowA"
+    show2 = dir2 / "ShowA"
+    _make_season_tree(show1, {"Season 1": ["s01e01.mkv"]})
+    _make_season_tree(show2, {"Season 1": ["s01e02.mkv"], "Season 2": ["s02e01.mkv"]})
+
+    seasons = collect_show_seasons([show1, show2])
+    # Expecting Season 1 to be merged (s01e01 and s01e02) and Season 2 to have s02e01
+    assert len(seasons) == 2
+    assert [f.name for f in seasons[0]] == ["s01e01.mkv", "s01e02.mkv"]
+    assert [f.name for f in seasons[1]] == ["s02e01.mkv"]
+
+
+def test_tui_state_persistence_loading_and_saving(tmp_path, monkeypatch):
+    """Test interactive_mode state simulation and saving via LayoutStore."""
+    import playlist_gen
+    from playlist_gen import LayoutStore, interactive_mode
+
+    layout_file = tmp_path / "tui_layouts.json"
+    monkeypatch.setattr(playlist_gen, "LAYOUT_FILE", layout_file)
+
+    # Pre-save some state
+    store = LayoutStore(filename=layout_file)
+    test_state = {
+        "dirs": ["/tmp/tui_test"],
+        "selected": ["ShowA"],
+        "groups": [["ShowA"]],
+        "output_path": "/tmp/tui_out.m3u",
+        "relative": True,
+        "repeat": True,
+        "show_order": "random",
+        "interleave_mode": "seasons",
+        "block_size": "5"
+    }
+    store.save_layout("Last Session State", test_state)
+
+    # Let's verify our monkeypatched config/state loads and reads
+    new_store = LayoutStore(filename=layout_file)
+    assert new_store.active_layout_name == "Last Session State"
+    active_state = new_store.get_active_state()
+    assert active_state["relative"] is True
+    assert active_state["repeat"] is True
 
 
 def test_build_playlist_missing_output_dir_returns_zero(tmp_path, capsys):

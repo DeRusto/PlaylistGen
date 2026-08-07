@@ -66,59 +66,100 @@ def _path_sort_key(f: Path, base: Path) -> list:
 # Episode collection
 # ---------------------------------------------------------------------------
 
-def collect_show_files(show_dir: Path) -> list[Path]:
-    """Return sorted video files under show_dir, descending into season subdirectories.
+def collect_show_files(show_dir: Path | list[Path]) -> list[Path]:
+    """Return sorted video files under show_dir(s), descending into season subdirectories.
 
     Files are ordered by each path component naturally, so Season 2 comes
     before Season 10, and episodes within a season stay in broadcast order.
     """
-    try:
-        files = [
-            f for f in show_dir.rglob("*")
-            if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
-        ]
-    except PermissionError as e:
-        print(f"Warning: cannot read '{show_dir}': {e}", file=sys.stderr)
-        return []
-    return sorted(files, key=lambda f: _path_sort_key(f, show_dir))
+    if isinstance(show_dir, Path):
+        dirs = [show_dir]
+    else:
+        dirs = list(show_dir)
+
+    all_files: list[tuple[Path, list]] = []
+    for d in dirs:
+        try:
+            files = [
+                f for f in d.rglob("*")
+                if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+            ]
+            for f in files:
+                all_files.append((f, _path_sort_key(f, d)))
+        except PermissionError as e:
+            print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
+        except OSError:
+            pass
+
+    sorted_files = [item[0] for item in sorted(all_files, key=lambda x: x[1])]
+    return sorted_files
 
 
-def collect_show_seasons(show_dir: Path) -> list[list[Path]]:
-    """Group episodes by immediate season subdirectory.
+def collect_show_seasons(show_dir: Path | list[Path]) -> list[list[Path]]:
+    """Group episodes by immediate season subdirectory, merging across directories if a list is provided.
 
     Returns a list of episode groups (each group is one season).
     Any video files directly in show_dir form the first group.
     For flat shows (no subdirectories), returns a single group of all episodes.
     """
-    try:
-        direct = sorted(
-            [f for f in show_dir.iterdir()
-             if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS],
-            key=natural_sort_key,
-        )
-        subdirs = sorted(
-            [d for d in show_dir.iterdir() if d.is_dir()],
-            key=natural_sort_key,
-        )
-    except PermissionError as e:
-        print(f"Warning: cannot read '{show_dir}': {e}", file=sys.stderr)
-        return []
+    if isinstance(show_dir, Path):
+        dirs = [show_dir]
+    else:
+        dirs = list(show_dir)
+
+    all_direct: list[Path] = []
+    for d in dirs:
+        try:
+            direct = [
+                f for f in d.iterdir()
+                if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+            ]
+            all_direct.extend(direct)
+        except PermissionError as e:
+            print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
+        except OSError:
+            pass
+
+    all_direct_sorted = sorted(all_direct, key=natural_sort_key)
+
+    subdirs_by_name: dict[str, list[Path]] = {}
+    for d in dirs:
+        try:
+            for item in d.iterdir():
+                if item.is_dir():
+                    subdirs_by_name.setdefault(item.name, []).append(item)
+        except PermissionError as e:
+            print(f"Warning: cannot read '{d}': {e}", file=sys.stderr)
+        except OSError:
+            pass
+
+    sorted_names = sorted(subdirs_by_name.keys(), key=_natural_key)
 
     seasons: list[list[Path]] = []
-    if direct:
-        seasons.append(direct)
-    for subdir in subdirs:
-        try:
-            eps = sorted(
-                [f for f in subdir.rglob("*")
-                 if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS],
-                key=lambda f, b=subdir: _path_sort_key(f, b),
-            )
-        except PermissionError as e:
-            print(f"Warning: cannot read '{subdir}': {e}", file=sys.stderr)
-            continue
-        if eps:
-            seasons.append(eps)
+    if all_direct_sorted:
+        seasons.append(all_direct_sorted)
+
+    for name in sorted_names:
+        subdirs_list = subdirs_by_name[name]
+        season_eps: list[tuple[Path, list]] = []
+        for subdir in subdirs_list:
+            try:
+                eps = [
+                    f for f in subdir.rglob("*")
+                    if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+                ]
+                for ep in eps:
+                    season_eps.append((ep, _path_sort_key(ep, subdir)))
+            except PermissionError as e:
+                print(f"Warning: cannot read '{subdir}': {e}", file=sys.stderr)
+                continue
+            except OSError:
+                pass
+
+        if season_eps:
+            sorted_eps = [item[0] for item in sorted(season_eps, key=lambda x: x[1])]
+            seasons.append(sorted_eps)
+
     return seasons
 
 
@@ -147,16 +188,6 @@ def interleave(lists: list[list], repeat: bool = False) -> list:
         for item in group:
             if item is not None:
                 result.append(item)
-    return result
-
-
-def shuffle_in_blocks(playlist: list[Path], block_size: int) -> list[Path]:
-    """Shuffle the playlist in consecutive blocks of block_size episodes."""
-    result: list[Path] = []
-    for i in range(0, len(playlist), block_size):
-        block = list(playlist[i:i + block_size])
-        random.shuffle(block)
-        result.extend(block)
     return result
 
 
@@ -220,36 +251,40 @@ def interleave_by_season(
 ShowInfo = tuple[str, Path, int, int]
 
 
-def _scan_dirs(dirs: list[Path]) -> list[tuple[str, Path]]:
-    """Scan each media dir for show subdirectories, returning (label, path) pairs.
+def _scan_dirs(dirs: list[Path]) -> list[tuple[str, Path | list[Path]]]:
+    """Scan each media dir for show subdirectories, returning (label, path_or_paths) pairs.
 
-    Shows are sorted alphabetically within each source dir. If the same show
-    name appears in more than one source dir the second gets a "(2)" suffix, etc.
+    If the same show name appears in more than one source dir, we merge their contents
+    and treat them as a single show. All shows are sorted alphabetically globally across
+    all included directories.
     """
-    raw: list[tuple[str, Path]] = []
-    name_counts: dict[str, int] = {}
+    shows_map: dict[str, list[Path]] = {}
     for media_dir in dirs:
         try:
-            entries = sorted(
-                [x for x in media_dir.iterdir() if x.is_dir()],
-                key=lambda x: x.name.lower(),
-            )
+            entries = [x for x in media_dir.iterdir() if x.is_dir()]
         except OSError as e:
             print(f"Warning: cannot read '{media_dir}': {e}", file=sys.stderr)
             continue
         for d in entries:
-            name_counts[d.name] = name_counts.get(d.name, 0) + 1
-            raw.append((d.name, d))
+            # Case-insensitive grouping but preserve original casing of first found or preferred
+            # Let's group by lower name but keep the key as the first seen casing
+            key = d.name
+            # To preserve exact casing if possible, find existing key
+            existing_key = next((k for k in shows_map if k.lower() == key.lower()), None)
+            if existing_key:
+                shows_map[existing_key].append(d)
+            else:
+                shows_map[key] = [d]
 
-    seen: dict[str, int] = {}
-    result: list[tuple[str, Path]] = []
-    for name, d in raw:
-        if name_counts[name] > 1:
-            seen[name] = seen.get(name, 0) + 1
-            label = name if seen[name] == 1 else f"{name} ({seen[name]})"
+    sorted_keys = sorted(shows_map.keys(), key=lambda s: s.lower())
+
+    result: list[tuple[str, Path | list[Path]]] = []
+    for key in sorted_keys:
+        paths = shows_map[key]
+        if len(paths) == 1:
+            result.append((key, paths[0]))
         else:
-            label = name
-        result.append((label, d))
+            result.append((key, paths))
     return result
 
 
@@ -268,7 +303,7 @@ def _refresh_shows(dirs: list[Path]) -> list[ShowInfo]:
 # Playlist builder
 # ---------------------------------------------------------------------------
 
-def _collect_group_episodes(group_labels: list[str], label_to_path: dict[str, Path]) -> list[Path]:
+def _collect_group_episodes(group_labels: list[str], label_to_path: dict[str, Path | list[Path]]) -> list[Path]:
     """Concatenate episodes from grouped shows sequentially."""
     result: list[Path] = []
     for label in group_labels:
@@ -277,7 +312,7 @@ def _collect_group_episodes(group_labels: list[str], label_to_path: dict[str, Pa
     return result
 
 
-def _collect_group_seasons(group_labels: list[str], label_to_path: dict[str, Path]) -> list[list[Path]]:
+def _collect_group_seasons(group_labels: list[str], label_to_path: dict[str, Path | list[Path]]) -> list[list[Path]]:
     """Concatenate all season groups from grouped shows sequentially."""
     result: list[list[Path]] = []
     for label in group_labels:
@@ -321,7 +356,15 @@ def build_playlist(
         show_entries = list(show_entries)
         random.shuffle(show_entries)
 
-    effective_groups = groups or []
+    # Pre-filter groups: remove any shows that are not part of show_entries (which contains selected shows if include is set)
+    valid_labels = {label for label, _ in show_entries}
+    effective_groups = []
+    if groups:
+        for g in groups:
+            filtered_g = [lbl for lbl in g if lbl in valid_labels]
+            if filtered_g:
+                effective_groups.append(filtered_g)
+
     label_to_path = {label: d for label, d in show_entries}
 
     # Map each label → index of its group (first occurrence wins)
@@ -345,7 +388,7 @@ def build_playlist(
                 if show_order == "random":
                     g_labels = list(g_labels)
                     random.shuffle(g_labels)
-                g_name = f"Group {g_idx + 1} ({', '.join(effective_groups[g_idx])})"
+                g_name = f"Group {g_idx + 1} ({', '.join(g_labels)})"
                 if interleave_mode == "seasons":
                     g_seasons = _collect_group_seasons(g_labels, label_to_path)
                     if g_seasons:
@@ -677,6 +720,9 @@ def _groups_screen(
 
 
 def interactive_mode() -> None:
+    # Initialize layout store and load previous active state (or last session state)
+    store = LayoutStore()
+
     dirs: list[Path] = []
     output: Path | None = None
     relative = False
@@ -687,6 +733,51 @@ def interactive_mode() -> None:
     show_info: list[ShowInfo] = []
     selected: set[str] = set()
     groups: list[list[str]] = []
+
+    # Try loading active state or first available layout state
+    state = store.get_active_state()
+    if not state and store.layouts:
+        state = list(store.layouts.values())[0]
+
+    if state:
+        dirs = [Path(d) for d in state.get("dirs", [])]
+        out_str = state.get("output_path", "")
+        output = Path(out_str).expanduser().resolve() if out_str else None
+        relative = state.get("relative", False)
+        repeat = state.get("repeat", False)
+        interleave_mode = state.get("interleave_mode", "none")
+        block_size = int(state.get("block_size", "10"))
+        show_order = state.get("show_order", "alpha")
+
+    # Perform initial rescan
+    show_info = _refresh_shows(dirs)
+    all_show_labels = {lbl for lbl, *_ in show_info}
+
+    if state:
+        selected = {lbl for lbl in state.get("selected", []) if lbl in all_show_labels}
+        raw_groups = state.get("groups", [])
+        groups = []
+        for g in raw_groups:
+            filtered_g = [lbl for lbl in g if lbl in all_show_labels]
+            if filtered_g:
+                groups.append(filtered_g)
+    else:
+        selected = all_show_labels
+
+    def save_state() -> None:
+        name = store.active_layout_name or "Last Session State"
+        state_dict = {
+            "dirs": [str(d) for d in dirs],
+            "selected": list(selected),
+            "groups": [list(g) for g in groups],
+            "output_path": str(output) if output else "",
+            "relative": relative,
+            "repeat": repeat,
+            "show_order": show_order,
+            "interleave_mode": interleave_mode,
+            "block_size": str(block_size),
+        }
+        store.save_layout(name, state_dict)
 
     def rescan() -> None:
         nonlocal show_info, selected, groups
@@ -701,6 +792,7 @@ def interactive_mode() -> None:
             for g in groups
         ]
         groups = [g for g in groups if g]
+        save_state()
 
     while True:
         _print_menu(dirs, output, relative, repeat, interleave_mode, block_size, show_info, selected, groups, show_order)
@@ -739,25 +831,32 @@ def interactive_mode() -> None:
 
         elif choice == "w" and show_info:
             selected = _selection_screen(show_info, selected)
+            save_state()
 
         elif raw_choice == "G" and show_info:
             groups = _groups_screen(show_info, selected, groups)
+            save_state()
 
         elif choice == "o":
             raw = input("Output file path (Enter for auto): ").strip()
             output = Path(raw).expanduser().resolve() if raw else None
+            save_state()
 
         elif choice == "p":
             relative = not relative
+            save_state()
 
         elif choice == "r":
             repeat = not repeat
+            save_state()
 
         elif choice == "n":
             show_order = "random" if show_order == "alpha" else "alpha"
+            save_state()
 
         elif choice == "s":
             interleave_mode, block_size = _mode_submenu(interleave_mode, block_size)
+            save_state()
 
         elif choice == "g" and dirs and selected:
             out = output or (dirs[0] / "interleaved.m3u")
@@ -858,6 +957,9 @@ class InterleaverGUI:
         self.root.geometry("950x700")
         self.root.minsize(850, 600)
 
+        # Guard against auto-saving while we are applying or loading state
+        self._loading_state = True
+
         # Initialize layout state variables
         self.dirs: list[Path] = []
         self.show_info: list[ShowInfo] = []
@@ -881,6 +983,38 @@ class InterleaverGUI:
         # Load previously active layout
         self.load_active_layout_state()
 
+        # Setup auto-save on close and traces
+        self._setup_auto_save()
+
+    def _setup_auto_save(self):
+        # Bind close handler
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Trace changes to settings variables
+        def trigger_auto_save(*args):
+            if not self._loading_state:
+                self.auto_save()
+
+        self.output_path_var.trace_add("write", trigger_auto_save)
+        self.relative_var.trace_add("write", trigger_auto_save)
+        self.repeat_var.trace_add("write", trigger_auto_save)
+        self.show_order_var.trace_add("write", trigger_auto_save)
+        self.interleave_mode_var.trace_add("write", trigger_auto_save)
+        self.block_size_var.trace_add("write", trigger_auto_save)
+
+        # Done loading
+        self._loading_state = False
+
+    def on_close(self):
+        # Save layout before leaving
+        self.auto_save()
+        self.root.destroy()
+
+    def auto_save(self):
+        # Saves to active layout if loaded, otherwise to "Last Session State" or standard default
+        name = self.store.active_layout_name or "Last Session State"
+        self.store.save_layout(name, self.get_current_state_dict())
+
     def get_current_state_dict(self) -> dict:
         return {
             "dirs": [str(d) for d in self.dirs],
@@ -895,6 +1029,10 @@ class InterleaverGUI:
         }
 
     def apply_state_dict(self, state: dict):
+        # Prevent auto-saves while restoring state
+        was_loading = self._loading_state
+        self._loading_state = True
+
         self.dirs = [Path(d) for d in state.get("dirs", [])]
         self._refresh_dirs_listbox()
 
@@ -921,6 +1059,8 @@ class InterleaverGUI:
 
         self._update_block_size_entry_state()
         self._refresh_shows_treeview()
+
+        self._loading_state = was_loading
 
     def load_active_layout_state(self):
         state = self.store.get_active_state()
@@ -1129,7 +1269,7 @@ class InterleaverGUI:
         for label, path, n_seasons, n_eps in self.show_info:
             is_sel = "[✓]" if label in self.selected else "[ ]"
             group_text = ""
-            if label in label_to_group:
+            if label in self.selected and label in label_to_group:
                 group_text = f"Group {label_to_group[label] + 1}"
 
             node_id = self.shows_tree.insert(
@@ -1151,6 +1291,7 @@ class InterleaverGUI:
                 self._refresh_dirs_listbox()
                 self.rescan_shows()
                 self.set_status(f"Added directory: {p}")
+                self.auto_save()
             else:
                 messagebox.showinfo("Directory exists", f"Directory is already added:\n{p}")
 
@@ -1162,6 +1303,7 @@ class InterleaverGUI:
             self._refresh_dirs_listbox()
             self.rescan_shows()
             self.set_status(f"Removed directory: {removed}")
+            self.auto_save()
         else:
             messagebox.showwarning("Selection Required", "Please select a directory to remove.")
 
@@ -1196,6 +1338,7 @@ class InterleaverGUI:
             else:
                 self.selected.add(label)
         self._refresh_shows_treeview()
+        self.auto_save()
 
     # --- Group Operations ---
 
@@ -1229,6 +1372,7 @@ class InterleaverGUI:
         self.groups.append(labels)
         self._refresh_shows_treeview()
         self.set_status(f"Created group with {len(labels)} shows.")
+        self.auto_save()
 
     def _get_group_choices(self) -> list[str]:
         choices = []
@@ -1295,6 +1439,7 @@ class InterleaverGUI:
 
                 self._refresh_shows_treeview()
                 self.set_status(f"Added {len(labels)} shows to Group {g_idx + 1}.")
+                self.auto_save()
             group_sel_win.destroy()
 
         ttk.Button(group_sel_win, text="Add to Group", command=confirm).pack(pady=10)
@@ -1309,6 +1454,7 @@ class InterleaverGUI:
         self.groups = [g for g in self.groups if g]
         self._refresh_shows_treeview()
         self.set_status("Removed selected shows from their groups.")
+        self.auto_save()
 
     def dissolve_group(self):
         if not self.groups:
@@ -1334,6 +1480,7 @@ class InterleaverGUI:
                 self.groups.pop(g_idx)
                 self._refresh_shows_treeview()
                 self.set_status(f"Dissolved Group {g_idx + 1}.")
+                self.auto_save()
             group_sel_win.destroy()
 
         ttk.Button(group_sel_win, text="Dissolve", command=confirm).pack(pady=10)
