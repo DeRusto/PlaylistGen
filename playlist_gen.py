@@ -839,7 +839,7 @@ class InterleaverGUI:
         self.root = root
         self.root.title("TV Playlist Interleaver")
         self.root.geometry("950x700")
-        self.root.minimum_size = (850, 600)
+        self.root.minsize(850, 600)
 
         # Initialize layout state variables
         self.dirs: list[Path] = []
