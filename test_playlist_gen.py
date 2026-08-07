@@ -750,3 +750,102 @@ def test_build_playlist_random_show_order_with_group(tmp_path):
     assert count == 5
     names = {Path(p).name for p in _read_playlist_paths(out)}
     assert names == {"a01.mkv", "a02.mkv", "a03.mkv", "b01.mkv", "c01.mkv"}
+
+
+# ---------------------------------------------------------------------------
+# State Persistence & GUI Tests
+# ---------------------------------------------------------------------------
+
+def test_layout_store_save_load_delete(tmp_path):
+    """Test basic LayoutStore state operations."""
+    from playlist_gen import LayoutStore
+    layout_file = tmp_path / "layouts_test.json"
+
+    store = LayoutStore(filename=layout_file)
+    assert len(store.layouts) == 0
+    assert store.active_layout_name is None
+
+    # Save a layout
+    test_state = {
+        "dirs": ["/tmp/test_dir"],
+        "selected": ["ShowA"],
+        "groups": [["ShowA", "ShowB"]],
+        "relative": True,
+        "repeat": False,
+        "show_order": "alpha",
+        "interleave_mode": "episodes",
+        "block_size": "5"
+    }
+    store.save_layout("Default Layout", test_state)
+
+    assert len(store.layouts) == 1
+    assert store.active_layout_name == "Default Layout"
+    assert store.get_layout("Default Layout") == test_state
+    assert store.get_active_state() == test_state
+
+    # Load again with a new store pointing to same file
+    new_store = LayoutStore(filename=layout_file)
+    assert len(new_store.layouts) == 1
+    assert new_store.active_layout_name == "Default Layout"
+    assert new_store.get_layout("Default Layout") == test_state
+
+    # Delete layout
+    new_store.delete_layout("Default Layout")
+    assert len(new_store.layouts) == 0
+    assert new_store.active_layout_name is None
+
+
+def test_gui_state_apply_and_extract(tmp_path):
+    """Test InterleaverGUI state serialization and deserialization."""
+    import tkinter as tk
+    from playlist_gen import InterleaverGUI, LayoutStore
+
+    # Create fake directory structure to prevent FileNotFoundError in rescan_shows
+    fake_dir = tmp_path / "fake_show_dir"
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    _make_tree(fake_dir, {
+        "BreakingBad": ["s01e01.mp4"],
+        "BetterCallSaul": ["s01e01.mp4"]
+    })
+
+    root = tk.Tk()
+    # Instantiate the GUI
+    # Monkeypatch LayoutStore to use a temp file during GUI initialization
+    old_layout_file = LayoutStore
+    class MockLayoutStore(LayoutStore):
+        def __init__(self, filename=tmp_path / "gui_layouts.json"):
+            super().__init__(filename=filename)
+
+    import playlist_gen
+    playlist_gen.LAYOUT_FILE = tmp_path / "gui_layouts.json"
+
+    app = InterleaverGUI(root)
+
+    # Apply standard state
+    state = {
+        "dirs": [str(fake_dir)],
+        "selected": ["BreakingBad"],
+        "groups": [["BreakingBad"]],
+        "output_path": "/tmp/test.m3u",
+        "relative": True,
+        "repeat": True,
+        "show_order": "random",
+        "interleave_mode": "episodes",
+        "block_size": "7"
+    }
+
+    app.apply_state_dict(state)
+
+    # Extract state from GUI and compare
+    current_state = app.get_current_state_dict()
+    assert current_state["dirs"] == [str(fake_dir)]
+    assert current_state["selected"] == ["BreakingBad"]
+    assert current_state["groups"] == [["BreakingBad"]]
+    assert current_state["output_path"] == "/tmp/test.m3u"
+    assert current_state["relative"] is True
+    assert current_state["repeat"] is True
+    assert current_state["show_order"] == "random"
+    assert current_state["interleave_mode"] == "episodes"
+    assert current_state["block_size"] == "7"
+
+    root.destroy()
