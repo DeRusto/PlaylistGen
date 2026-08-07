@@ -1491,6 +1491,7 @@ class InterleaverGUI:
                     active_state = self.store.get_active_state()
                     if active_state:
                         self.apply_state_dict(active_state)
+                        self._update_window_title()
                     else:
                         self.new_layout()
                 else:
