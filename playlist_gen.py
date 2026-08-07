@@ -1346,6 +1346,7 @@ class InterleaverGUI:
 
         try:
             self.set_status("Generating playlist...")
+            self.root.update_idletasks()
             count = build_playlist(
                 dirs=self.dirs,
                 output=output,
