@@ -2,10 +2,16 @@
 """
 TV Playlist Interleaver
 Scans media directories for TV show subdirectories and produces an interleaved M3U playlist.
-Run with no arguments to enter the interactive menu.
+Includes:
+- Standard CLI mode
+- Interactive Text Menu (using `--text`)
+- Tkinter GUI with robust file management and layout/state persistence (default mode with no arguments)
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import os
 import random
 import re
@@ -13,11 +19,27 @@ import sys
 from itertools import cycle, islice, zip_longest
 from pathlib import Path
 
+# Tkinter imports for GUI
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except ImportError:
+    tk = None  # type: ignore
+    filedialog = None  # type: ignore
+    messagebox = None  # type: ignore
+    ttk = None  # type: ignore
+
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".m4v",
     ".mpg", ".mpeg", ".ts", ".m2ts", ".webm", ".ogv",
 }
 
+# LAYOUT_FILE configuration using XDG_CONFIG_HOME or standard config directory under playlist_gen/playlist_layouts.json
+_xdg_config = os.environ.get("XDG_CONFIG_HOME")
+if _xdg_config:
+    LAYOUT_FILE = Path(_xdg_config) / "playlist_gen" / "playlist_layouts.json"
+else:
+    LAYOUT_FILE = Path.home() / ".config" / "playlist_gen" / "playlist_layouts.json"
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -212,7 +234,7 @@ def _scan_dirs(dirs: list[Path]) -> list[tuple[str, Path]]:
                 [x for x in media_dir.iterdir() if x.is_dir()],
                 key=lambda x: x.name.lower(),
             )
-        except PermissionError as e:
+        except OSError as e:
             print(f"Warning: cannot read '{media_dir}': {e}", file=sys.stderr)
             continue
         for d in entries:
@@ -389,7 +411,7 @@ def build_playlist(
 
 
 # ---------------------------------------------------------------------------
-# Interactive menu
+# Interactive text menu
 # ---------------------------------------------------------------------------
 
 _MODE_LABELS = {
@@ -631,8 +653,6 @@ def _groups_screen(
                     ]
                     groups = [g for g in groups if g]
                     # Re-find target group index (list may have shifted after cleanup)
-                    # Re-parse g_idx after cleanup is complex; just append to the group
-                    # identified before cleanup if it still exists
                     if g_idx < len(groups):
                         groups[g_idx].append(label)
                     else:
@@ -761,7 +781,795 @@ def interactive_mode() -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# State Management & Persistence (JSON Store)
+# ---------------------------------------------------------------------------
+
+class LayoutStore:
+    def __init__(self, filename: Path | None = None):
+        self.filename = filename if filename is not None else LAYOUT_FILE
+        self.layouts: dict[str, dict] = {}
+        self.active_layout_name: str | None = None
+        self.load_all()
+
+    def load_all(self):
+        if self.filename.exists():
+            try:
+                with self.filename.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self.layouts = data.get("layouts", {})
+                    self.active_layout_name = data.get("active_layout_name", None)
+                else:
+                    raise ValueError("Root JSON is not a dictionary")
+            except (OSError, json.JSONDecodeError, ValueError) as e:
+                print(f"Warning: Failed to load layouts from {self.filename}: {e}", file=sys.stderr)
+                self.layouts = {}
+                self.active_layout_name = None
+        else:
+            self.layouts = {}
+            self.active_layout_name = None
+
+    def save_all(self) -> bool:
+        try:
+            self.filename.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.filename.with_suffix(".tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
+                json.dump({
+                    "layouts": self.layouts,
+                    "active_layout_name": self.active_layout_name
+                }, f, indent=2)
+            os.replace(tmp_path, self.filename)
+            return True
+        except Exception as e:
+            print(f"Error: Failed to save layouts to {self.filename}: {e}", file=sys.stderr)
+            return False
+
+    def get_layout(self, name: str) -> dict | None:
+        return self.layouts.get(name, None)
+
+    def save_layout(self, name: str, state: dict) -> bool:
+        import copy
+        self.layouts[name] = copy.deepcopy(state)
+        self.active_layout_name = name
+        return self.save_all()
+
+    def delete_layout(self, name: str) -> bool:
+        if name in self.layouts:
+            del self.layouts[name]
+            if self.active_layout_name == name:
+                self.active_layout_name = list(self.layouts.keys())[0] if self.layouts else None
+            return self.save_all()
+        return False
+
+    def get_active_state(self) -> dict | None:
+        if self.active_layout_name and self.active_layout_name in self.layouts:
+            return self.layouts[self.active_layout_name]
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Tkinter GUI Application
+# ---------------------------------------------------------------------------
+
+class InterleaverGUI:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("TV Playlist Interleaver")
+        self.root.geometry("950x700")
+        self.root.minsize(850, 600)
+
+        # Initialize layout state variables
+        self.dirs: list[Path] = []
+        self.show_info: list[ShowInfo] = []
+        self.selected: set[str] = set()
+        self.groups: list[list[str]] = []
+
+        # Settings
+        self.output_path_var = tk.StringVar(value="")
+        self.relative_var = tk.BooleanVar(value=False)
+        self.repeat_var = tk.BooleanVar(value=False)
+        self.show_order_var = tk.StringVar(value="alpha")
+        self.interleave_mode_var = tk.StringVar(value="none")
+        self.block_size_var = tk.StringVar(value="10")
+
+        self.store = LayoutStore()
+
+        # UI setup
+        self._create_menu()
+        self._create_widgets()
+
+        # Load previously active layout
+        self.load_active_layout_state()
+
+    def get_current_state_dict(self) -> dict:
+        return {
+            "dirs": [str(d) for d in self.dirs],
+            "selected": list(self.selected),
+            "groups": [list(g) for g in self.groups],
+            "output_path": self.output_path_var.get(),
+            "relative": self.relative_var.get(),
+            "repeat": self.repeat_var.get(),
+            "show_order": self.show_order_var.get(),
+            "interleave_mode": self.interleave_mode_var.get(),
+            "block_size": self.block_size_var.get(),
+        }
+
+    def apply_state_dict(self, state: dict):
+        self.dirs = [Path(d) for d in state.get("dirs", [])]
+        self._refresh_dirs_listbox()
+
+        # Scan shows based on directories
+        self.rescan_shows()
+
+        # Restore selections & groups
+        all_show_labels = {lbl for lbl, *_ in self.show_info}
+        self.selected = {lbl for lbl in state.get("selected", []) if lbl in all_show_labels}
+
+        raw_groups = state.get("groups", [])
+        self.groups = []
+        for g in raw_groups:
+            filtered_g = [lbl for lbl in g if lbl in all_show_labels]
+            if filtered_g:
+                self.groups.append(filtered_g)
+
+        self.output_path_var.set(state.get("output_path", ""))
+        self.relative_var.set(state.get("relative", False))
+        self.repeat_var.set(state.get("repeat", False))
+        self.show_order_var.set(state.get("show_order", "alpha"))
+        self.interleave_mode_var.set(state.get("interleave_mode", "none"))
+        self.block_size_var.set(state.get("block_size", "10"))
+
+        self._update_block_size_entry_state()
+        self._refresh_shows_treeview()
+
+    def load_active_layout_state(self):
+        state = self.store.get_active_state()
+        if state:
+            self.apply_state_dict(state)
+            self._update_window_title()
+        else:
+            self._update_window_title()
+
+    def _update_window_title(self):
+        layout_name = self.store.active_layout_name or "Unsaved Layout"
+        self.root.title(f"TV Playlist Interleaver — [{layout_name}]")
+
+    def _create_menu(self):
+        menubar = tk.Menu(self.root)
+
+        # File Menu
+        filemenu = tk.Menu(menubar, tearoff=0)
+        filemenu.add_command(label="New Layout", command=self.new_layout)
+        filemenu.add_command(label="Save Layout", command=self.save_layout)
+        filemenu.add_command(label="Save Layout As...", command=self.save_layout_as)
+        filemenu.add_command(label="Load Layout...", command=self.load_layout)
+        filemenu.add_command(label="Delete Layout...", command=self.delete_layout)
+        filemenu.add_separator()
+        filemenu.add_command(label="Exit", command=self.root.quit)
+        menubar.add_cascade(label="File", menu=filemenu)
+
+        self.root.config(menu=menubar)
+
+    def _create_widgets(self):
+        # Create Main paned window or grid layout
+        main_frame = ttk.Frame(self.root, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Left Column: Directories & Settings
+        left_col = ttk.Frame(main_frame, width=320)
+        left_col.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+
+        # Right Column: Shows & Group Management
+        right_col = ttk.Frame(main_frame)
+        right_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # --- LEFT COLUMN COMPONENTS ---
+
+        # 1. Directory Manager
+        dir_frame = ttk.LabelFrame(left_col, text="Media Source Directories", padding=5)
+        dir_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        self.dir_listbox = tk.Listbox(dir_frame, height=5, selectmode=tk.SINGLE)
+        self.dir_listbox.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+
+        dir_btn_frame = ttk.Frame(dir_frame)
+        dir_btn_frame.pack(fill=tk.X)
+
+        add_dir_btn = ttk.Button(dir_btn_frame, text="Add Directory...", command=self.add_directory)
+        add_dir_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        rem_dir_btn = ttk.Button(dir_btn_frame, text="Remove", command=self.remove_directory)
+        rem_dir_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        # 2. Settings Panel
+        settings_frame = ttk.LabelFrame(left_col, text="Playlist Settings", padding=10)
+        settings_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Interleave Mode
+        ttk.Label(settings_frame, text="Interleave Mode:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.mode_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.interleave_mode_var,
+            values=["none", "episodes", "seasons"],
+            state="readonly"
+        )
+        self.mode_combo.grid(row=0, column=1, sticky=tk.EW, pady=5)
+        self.mode_combo.bind("<<ComboboxSelected>>", lambda e: self._update_block_size_entry_state())
+
+        # Block Size (only enabled if mode is episodes)
+        ttk.Label(settings_frame, text="Block Size (N):").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.block_size_entry = ttk.Entry(settings_frame, textvariable=self.block_size_var, width=10)
+        self.block_size_entry.grid(row=1, column=1, sticky=tk.W, pady=5)
+
+        # Show Order
+        ttk.Label(settings_frame, text="Show Order:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.order_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.show_order_var,
+            values=["alpha", "random"],
+            state="readonly"
+        )
+        self.order_combo.grid(row=2, column=1, sticky=tk.EW, pady=5)
+
+        # Path Style Checkbox
+        rel_chk = ttk.Checkbutton(settings_frame, text="Write Relative Paths", variable=self.relative_var)
+        rel_chk.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        # Repeat Checkbox
+        rep_chk = ttk.Checkbutton(settings_frame, text="Repeat Shorter Shows", variable=self.repeat_var)
+        rep_chk.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        # Output File Path
+        ttk.Label(settings_frame, text="Output Playlist:").grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(10, 2))
+
+        out_path_frame = ttk.Frame(settings_frame)
+        out_path_frame.grid(row=6, column=0, columnspan=2, sticky=tk.EW)
+
+        out_entry = ttk.Entry(out_path_frame, textvariable=self.output_path_var)
+        out_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+        browse_out_btn = ttk.Button(out_path_frame, text="...", width=3, command=self.browse_output_path)
+        browse_out_btn.pack(side=tk.RIGHT)
+
+        # --- RIGHT COLUMN COMPONENTS ---
+
+        # 1. Shows treeview
+        shows_frame = ttk.LabelFrame(right_col, text="TV Shows Discovered", padding=5)
+        shows_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # Scrollbar + Treeview
+        tree_scroll = ttk.Scrollbar(shows_frame)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.shows_tree = ttk.Treeview(
+            shows_frame,
+            columns=("selected", "name", "group", "seasons", "episodes"),
+            show="headings",
+            yscrollcommand=tree_scroll.set,
+            selectmode="extended"
+        )
+        self.shows_tree.pack(fill=tk.BOTH, expand=True)
+        tree_scroll.config(command=self.shows_tree.yview)
+
+        self.shows_tree.heading("selected", text="Use?", anchor=tk.CENTER)
+        self.shows_tree.heading("name", text="Show Name", anchor=tk.W)
+        self.shows_tree.heading("group", text="Group", anchor=tk.CENTER)
+        self.shows_tree.heading("seasons", text="Seasons", anchor=tk.CENTER)
+        self.shows_tree.heading("episodes", text="Episodes", anchor=tk.CENTER)
+
+        self.shows_tree.column("selected", width=50, stretch=False, anchor=tk.CENTER)
+        self.shows_tree.column("name", width=250, minwidth=150, stretch=True, anchor=tk.W)
+        self.shows_tree.column("group", width=120, stretch=True, anchor=tk.CENTER)
+        self.shows_tree.column("seasons", width=70, stretch=False, anchor=tk.CENTER)
+        self.shows_tree.column("episodes", width=70, stretch=False, anchor=tk.CENTER)
+
+        # Bind spacebar / double click to toggle use/selected status of a show
+        self.shows_tree.bind("<space>", lambda e: self.toggle_show_selected())
+        self.shows_tree.bind("<Double-1>", lambda e: self.toggle_show_selected())
+
+        # 2. Group Management Toolbar
+        grp_frame = ttk.LabelFrame(right_col, text="Group Management", padding=5)
+        grp_frame.pack(fill=tk.X, pady=(0, 10))
+
+        grp_btn_frame = ttk.Frame(grp_frame)
+        grp_btn_frame.pack(fill=tk.X, expand=True)
+
+        create_grp_btn = ttk.Button(grp_btn_frame, text="Create Group from Selected", command=self.create_group_from_selected)
+        create_grp_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        add_grp_btn = ttk.Button(grp_btn_frame, text="Add Selected to Group...", command=self.add_selected_to_group)
+        add_grp_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        rem_grp_btn = ttk.Button(grp_btn_frame, text="Remove Selected from Group", command=self.remove_selected_from_group)
+        rem_grp_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        dissolve_grp_btn = ttk.Button(grp_btn_frame, text="Dissolve Group...", command=self.dissolve_group)
+        dissolve_grp_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        # Footer Actions
+        footer_frame = ttk.Frame(main_frame)
+        footer_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
+
+        self.status_label = ttk.Label(footer_frame, text="Ready", font=("TkDefaultFont", 10, "italic"))
+        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        generate_btn = ttk.Button(footer_frame, text="Generate Playlist", style="TButton", command=self.generate_playlist)
+        generate_btn.pack(side=tk.RIGHT, padx=5, ipady=5)
+
+    def _update_block_size_entry_state(self):
+        if self.interleave_mode_var.get() == "episodes":
+            self.block_size_entry.config(state="normal")
+        else:
+            self.block_size_entry.config(state="disabled")
+
+    def _refresh_dirs_listbox(self):
+        self.dir_listbox.delete(0, tk.END)
+        for d in self.dirs:
+            self.dir_listbox.insert(tk.END, str(d))
+
+    def _refresh_shows_treeview(self):
+        # Save active focus/selection names if possible
+        selected_items = self.shows_tree.selection()
+        selected_names = []
+        for item in selected_items:
+            vals = self.shows_tree.item(item, "values")
+            if vals and len(vals) > 1:
+                selected_names.append(vals[1])
+
+        # Clear
+        for item in self.shows_tree.get_children():
+            self.shows_tree.delete(item)
+
+        label_to_group: dict[str, int] = {}
+        for g_idx, g in enumerate(self.groups):
+            for lbl in g:
+                label_to_group[lbl] = g_idx
+
+        # Populating treeview
+        for label, path, n_seasons, n_eps in self.show_info:
+            is_sel = "[✓]" if label in self.selected else "[ ]"
+            group_text = ""
+            if label in label_to_group:
+                group_text = f"Group {label_to_group[label] + 1}"
+
+            node_id = self.shows_tree.insert(
+                "",
+                tk.END,
+                values=(is_sel, label, group_text, str(n_seasons), str(n_eps))
+            )
+            if label in selected_names:
+                self.shows_tree.selection_add(node_id)
+
+    # --- Directory Operations ---
+
+    def add_directory(self):
+        chosen = filedialog.askdirectory(title="Select Media Source Directory")
+        if chosen:
+            p = Path(chosen).resolve()
+            if p not in self.dirs:
+                self.dirs.append(p)
+                self._refresh_dirs_listbox()
+                self.rescan_shows()
+                self.set_status(f"Added directory: {p}")
+            else:
+                messagebox.showinfo("Directory exists", f"Directory is already added:\n{p}")
+
+    def remove_directory(self):
+        sel = self.dir_listbox.curselection()
+        if sel:
+            idx = sel[0]
+            removed = self.dirs.pop(idx)
+            self._refresh_dirs_listbox()
+            self.rescan_shows()
+            self.set_status(f"Removed directory: {removed}")
+        else:
+            messagebox.showwarning("Selection Required", "Please select a directory to remove.")
+
+    def rescan_shows(self):
+        old_labels = {lbl for lbl, *_ in self.show_info}
+        self.show_info = _refresh_shows(self.dirs)
+        new_labels = {lbl for lbl, *_ in self.show_info}
+
+        # Preserve selection only for currently discovered shows, auto-select newly discovered shows
+        self.selected = (self.selected & new_labels) | (new_labels - old_labels)
+
+        # Strip deleted shows from groups
+        cleaned_groups = []
+        for g in self.groups:
+            filtered = [lbl for lbl in g if lbl in new_labels]
+            if filtered:
+                cleaned_groups.append(filtered)
+        self.groups = cleaned_groups
+
+        self._refresh_shows_treeview()
+
+    # --- Show Treeview Actions ---
+
+    def toggle_show_selected(self):
+        for item in self.shows_tree.selection():
+            vals = self.shows_tree.item(item, "values")
+            if not vals:
+                continue
+            label = vals[1]
+            if label in self.selected:
+                self.selected.discard(label)
+            else:
+                self.selected.add(label)
+        self._refresh_shows_treeview()
+
+    # --- Group Operations ---
+
+    def get_selected_show_labels(self) -> list[str]:
+        labels = []
+        for item in self.shows_tree.selection():
+            vals = self.shows_tree.item(item, "values")
+            if vals:
+                labels.append(vals[1])
+        return labels
+
+    def create_group_from_selected(self):
+        labels = self.get_selected_show_labels()
+        # Verify selected shows are part of 'selected' for playlist use
+        for lbl in labels:
+            if lbl not in self.selected:
+                messagebox.showwarning(
+                    "Show not in Use",
+                    f"Show '{lbl}' must be checked ('Use?') before grouping."
+                )
+                return
+
+        if len(labels) < 2:
+            messagebox.showwarning("Selection Required", "Please select 2 or more shows to create a group.")
+            return
+
+        # Remove from any existing group
+        self.groups = [[lbl for lbl in g if lbl not in labels] for g in self.groups]
+        self.groups = [g for g in self.groups if g]
+
+        self.groups.append(labels)
+        self._refresh_shows_treeview()
+        self.set_status(f"Created group with {len(labels)} shows.")
+
+    def _get_group_choices(self) -> list[str]:
+        choices = []
+        for i, g in enumerate(self.groups):
+            name_part = ", ".join(g[:3])
+            suffix = "..." if len(g) > 3 else ""
+            choices.append(f"Group {i+1} ({name_part}{suffix})")
+        return choices
+
+    def add_selected_to_group(self):
+        labels = self.get_selected_show_labels()
+        if not labels:
+            messagebox.showwarning("Selection Required", "Please select one or more shows to add to a group.")
+            return
+
+        for lbl in labels:
+            if lbl not in self.selected:
+                messagebox.showwarning(
+                    "Show not in Use",
+                    f"Show '{lbl}' must be checked ('Use?') before grouping."
+                )
+                return
+
+        if not self.groups:
+            messagebox.showinfo("No Groups", "There are no existing groups. Please use 'Create Group' first.")
+            return
+
+        # Let user select from a dialog list of groups
+        group_sel_win = tk.Toplevel(self.root)
+        group_sel_win.title("Select Target Group")
+        group_sel_win.geometry("300x200")
+        group_sel_win.transient(self.root)
+        group_sel_win.grab_set()
+
+        ttk.Label(group_sel_win, text="Select existing group:").pack(pady=5)
+
+        group_choices = self._get_group_choices()
+        combo = ttk.Combobox(group_sel_win, values=group_choices, state="readonly")
+        combo.pack(pady=10, fill=tk.X, padx=10)
+        combo.current(0)
+
+        def confirm():
+            g_idx = combo.current()
+            if g_idx >= 0:
+                target_group = self.groups[g_idx] if g_idx < len(self.groups) else None
+
+                # Remove labels from other groups in-place to preserve target_group identity
+                for g in list(self.groups):
+                    for lbl in list(g):
+                        if lbl in labels:
+                            g.remove(lbl)
+                    if not g:
+                        self.groups.remove(g)
+
+                # Append
+                if target_group is not None:
+                    if target_group not in self.groups:
+                        self.groups.append(target_group)
+                    for lbl in labels:
+                        if lbl not in target_group:
+                            target_group.append(lbl)
+                else:
+                    self.groups.append(labels)
+
+                self._refresh_shows_treeview()
+                self.set_status(f"Added {len(labels)} shows to Group {g_idx + 1}.")
+            group_sel_win.destroy()
+
+        ttk.Button(group_sel_win, text="Add to Group", command=confirm).pack(pady=10)
+
+    def remove_selected_from_group(self):
+        labels = self.get_selected_show_labels()
+        if not labels:
+            messagebox.showwarning("Selection Required", "Please select one or more shows to remove from their groups.")
+            return
+
+        self.groups = [[lbl for lbl in g if lbl not in labels] for g in self.groups]
+        self.groups = [g for g in self.groups if g]
+        self._refresh_shows_treeview()
+        self.set_status("Removed selected shows from their groups.")
+
+    def dissolve_group(self):
+        if not self.groups:
+            messagebox.showinfo("No Groups", "No groups are currently defined.")
+            return
+
+        group_sel_win = tk.Toplevel(self.root)
+        group_sel_win.title("Dissolve Group")
+        group_sel_win.geometry("300x200")
+        group_sel_win.transient(self.root)
+        group_sel_win.grab_set()
+
+        ttk.Label(group_sel_win, text="Select group to dissolve:").pack(pady=5)
+
+        group_choices = self._get_group_choices()
+        combo = ttk.Combobox(group_sel_win, values=group_choices, state="readonly")
+        combo.pack(pady=10, fill=tk.X, padx=10)
+        combo.current(0)
+
+        def confirm():
+            g_idx = combo.current()
+            if g_idx >= 0 and g_idx < len(self.groups):
+                self.groups.pop(g_idx)
+                self._refresh_shows_treeview()
+                self.set_status(f"Dissolved Group {g_idx + 1}.")
+            group_sel_win.destroy()
+
+        ttk.Button(group_sel_win, text="Dissolve", command=confirm).pack(pady=10)
+
+    # --- Output Path Picker ---
+
+    def browse_output_path(self):
+        chosen = filedialog.asksaveasfilename(
+            title="Save M3U Playlist As",
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")]
+        )
+        if chosen:
+            self.output_path_var.set(chosen)
+
+    # --- Playlist Generation ---
+
+    def generate_playlist(self):
+        if not self.dirs:
+            messagebox.showerror("Error", "Please add at least one media directory first.")
+            return
+
+        if not self.selected:
+            messagebox.showerror("Error", "Please select/check ('Use?') at least one show.")
+            return
+
+        out_str = self.output_path_var.get().strip()
+        if out_str:
+            output = Path(out_str).expanduser().resolve()
+        else:
+            output = self.dirs[0] / "interleaved.m3u"
+
+        # Validate block size if in episodes mode
+        block_size = 10
+        if self.interleave_mode_var.get() == "episodes":
+            raw_bs = self.block_size_var.get().strip()
+            if not raw_bs.isdigit() or int(raw_bs) <= 0:
+                messagebox.showerror("Error", "Block Size must be a positive integer.")
+                return
+            block_size = int(raw_bs)
+
+        include = {lbl for lbl, *_ in self.show_info if lbl in self.selected}
+
+        self.set_status("Generating playlist...")
+        self.root.update_idletasks()
+
+        import threading
+
+        def worker():
+            try:
+                count = build_playlist(
+                    dirs=self.dirs,
+                    output=output,
+                    relative=self.relative_var.get(),
+                    repeat=self.repeat_var.get(),
+                    interleave_mode=self.interleave_mode_var.get(),
+                    block_size=block_size,
+                    include=include,
+                    groups=self.groups,
+                    show_order=self.show_order_var.get(),
+                )
+                self.root.after(0, lambda: self._generation_done(output, count))
+            except Exception as e:
+                self.root.after(0, lambda: self._generation_failed(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _generation_done(self, output: Path, count: int):
+        if count > 0:
+            messagebox.showinfo("Success", f"Playlist generated successfully!\nPath: {output}\nEntries: {count}")
+            self.set_status(f"Generated {count} entries into: {output.name}")
+        else:
+            messagebox.showwarning("No Playlist Generated", "No video files were found matching your parameters.")
+            self.set_status("No playlist generated.")
+
+    def _generation_failed(self, error: Exception):
+        messagebox.showerror("Generation Error", f"An error occurred during playlist generation:\n{error}")
+        self.set_status("Generation failed.")
+
+    # --- Layout State Operations ---
+
+    def new_layout(self):
+        # Reset everything
+        self.dirs = []
+        self.show_info = []
+        self.selected = set()
+        self.groups = []
+        self.output_path_var.set("")
+        self.relative_var.set(False)
+        self.repeat_var.set(False)
+        self.show_order_var.set("alpha")
+        self.interleave_mode_var.set("none")
+        self.block_size_var.set("10")
+
+        self.store.active_layout_name = None
+        self.store.save_all()
+        self._refresh_dirs_listbox()
+        self._refresh_shows_treeview()
+        self._update_block_size_entry_state()
+        self._update_window_title()
+        self.set_status("Created new layout.")
+
+    def save_layout(self):
+        name = self.store.active_layout_name
+        if name:
+            if self.store.save_layout(name, self.get_current_state_dict()):
+                self.set_status(f"Saved layout: {name}")
+            else:
+                messagebox.showerror("Error", f"Failed to save layout: {name}")
+                self.set_status("Save failed.")
+        else:
+            self.save_layout_as()
+
+    def save_layout_as(self):
+        # Prompt for name
+        save_win = tk.Toplevel(self.root)
+        save_win.title("Save Layout As")
+        save_win.geometry("300x120")
+        save_win.transient(self.root)
+        save_win.grab_set()
+
+        ttk.Label(save_win, text="Enter Layout Name:").pack(pady=5)
+        name_entry = ttk.Entry(save_win)
+        name_entry.pack(fill=tk.X, padx=10, pady=5)
+        name_entry.focus_set()
+
+        # Prefill current name if it exists
+        if self.store.active_layout_name:
+            name_entry.insert(0, self.store.active_layout_name)
+
+        def confirm():
+            name = name_entry.get().strip()
+            if name:
+                if name in self.store.layouts:
+                    if not messagebox.askyesno("Confirm Overwrite", f"Layout '{name}' already exists. Overwrite?"):
+                        return
+                if self.store.save_layout(name, self.get_current_state_dict()):
+                    self._update_window_title()
+                    self.set_status(f"Saved layout: {name}")
+                    save_win.destroy()
+                else:
+                    messagebox.showerror("Error", f"Failed to save layout: {name}")
+                    self.set_status("Save failed.")
+            else:
+                messagebox.showwarning("Name Required", "Please enter a valid layout name.")
+
+        ttk.Button(save_win, text="Save", command=confirm).pack(pady=5)
+
+    def load_layout(self):
+        if not self.store.layouts:
+            messagebox.showinfo("No Saved Layouts", "There are no saved layouts to load.")
+            return
+
+        load_win = tk.Toplevel(self.root)
+        load_win.title("Load Layout")
+        load_win.geometry("300x200")
+        load_win.transient(self.root)
+        load_win.grab_set()
+
+        ttk.Label(load_win, text="Select Layout:").pack(pady=5)
+        choices = list(self.store.layouts.keys())
+        combo = ttk.Combobox(load_win, values=choices, state="readonly")
+        combo.pack(fill=tk.X, padx=10, pady=10)
+
+        # Select active in combo if applicable
+        if self.store.active_layout_name in choices:
+            combo.current(choices.index(self.store.active_layout_name))
+        else:
+            combo.current(0)
+
+        def confirm():
+            name = combo.get()
+            state = self.store.get_layout(name)
+            if state:
+                self.store.active_layout_name = name
+                self.store.save_all()
+                self.apply_state_dict(state)
+                self._update_window_title()
+                self.set_status(f"Loaded layout: {name}")
+            load_win.destroy()
+
+        ttk.Button(load_win, text="Load", command=confirm).pack(pady=10)
+
+    def delete_layout(self):
+        if not self.store.layouts:
+            messagebox.showinfo("No Saved Layouts", "There are no layouts to delete.")
+            return
+
+        del_win = tk.Toplevel(self.root)
+        del_win.title("Delete Layout")
+        del_win.geometry("300x200")
+        del_win.transient(self.root)
+        del_win.grab_set()
+
+        ttk.Label(del_win, text="Select Layout to Delete:").pack(pady=5)
+        choices = list(self.store.layouts.keys())
+        combo = ttk.Combobox(del_win, values=choices, state="readonly")
+        combo.pack(fill=tk.X, padx=10, pady=10)
+        combo.current(0)
+
+        def confirm():
+            name = combo.get()
+            if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete layout: '{name}'?"):
+                self.store.delete_layout(name)
+                self.set_status(f"Deleted layout: {name}")
+                if self.store.active_layout_name:
+                    active_state = self.store.get_active_state()
+                    if active_state:
+                        self.apply_state_dict(active_state)
+                        self._update_window_title()
+                    else:
+                        self.new_layout()
+                else:
+                    self.new_layout()
+            del_win.destroy()
+
+        ttk.Button(del_win, text="Delete", command=confirm).pack(pady=10)
+
+    # --- Help Status bar helper ---
+
+    def set_status(self, text: str):
+        self.status_label.config(text=text)
+
+
+def launch_gui():
+    if not tk:
+        print("Error: Tkinter is not installed or available on this system. Cannot launch GUI.", file=sys.stderr)
+        sys.exit(1)
+
+    root = tk.Tk()
+    app = InterleaverGUI(root)
+    root.mainloop()
+
+
+# ---------------------------------------------------------------------------
+# CLI Entrypoint
 # ---------------------------------------------------------------------------
 
 def _positive_int(value: str) -> int:
@@ -773,8 +1581,9 @@ def _positive_int(value: str) -> int:
 
 
 def main() -> None:
+    # No arguments -> GUI
     if len(sys.argv) == 1:
-        interactive_mode()
+        launch_gui()
         return
 
     parser = argparse.ArgumentParser(
@@ -790,9 +1599,14 @@ Examples:
 """,
     )
     parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Launch the interactive text menu",
+    )
+    parser.add_argument(
         "media_dirs",
         type=Path,
-        nargs="+",
+        nargs="*",
         metavar="media_dir",
         help="One or more directories containing TV show subdirectories",
     )
@@ -834,6 +1648,13 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    if args.text:
+        interactive_mode()
+        return
+
+    if not args.media_dirs:
+        parser.error("the following arguments are required: media_dir")
 
     dirs = [d.resolve() for d in args.media_dirs]
     for d in dirs:
