@@ -186,6 +186,7 @@ def interleave(lists: list[list], repeat: bool = False) -> list:
     repeat=True: shorter lists cycle back to their first episode.
       [a1,a2,a3], [b1,b2] → [a1,b1, a2,b2, a3,b1]
     """
+    lists = [lst for lst in lists if lst]
     if not lists:
         return []
     if repeat:
@@ -209,6 +210,7 @@ def interleave_in_blocks(lists: list[list], block_size: int, repeat: bool = Fals
       [a1,a2,a3,a4,a5], [b1,b2,b3], block_size=2
       → a1 a2  b1 b2  a3 a4  b3  a5
     """
+    lists = [lst for lst in lists if lst]
     if not lists:
         return []
     if repeat:
@@ -239,6 +241,7 @@ def interleave_by_season(
 
     show_seasons: list of shows; each show is a list of season-episode lists.
     """
+    show_seasons = [s for s in show_seasons if s]
     if not show_seasons:
         return []
     max_seasons = max(len(s) for s in show_seasons)
@@ -745,6 +748,8 @@ def interactive_mode() -> None:
 
     # Try loading active state or first available layout state
     state = store.get_active_state()
+    if not state and "Last Session State" in store.layouts:
+        state = store.layouts["Last Session State"]
     if not state and store.layouts:
         state = next(iter(store.layouts.values()))
 
@@ -1106,6 +1111,8 @@ class InterleaverGUI:
 
     def load_active_layout_state(self):
         state = self.store.get_active_state()
+        if not state and "Last Session State" in self.store.layouts:
+            state = self.store.layouts["Last Session State"]
         if state:
             self.apply_state_dict(state)
             self._update_window_title()
