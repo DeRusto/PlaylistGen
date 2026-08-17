@@ -178,14 +178,15 @@ def collect_show_seasons(show_dir: Path | list[Path]) -> list[list[Path]]:
 
 def interleave(lists: list[list], repeat: bool = False) -> list:
     """
-    Round-robin interleave across all lists.
-
-    repeat=False: exhausted lists are skipped; longer lists fill the tail.
-      [a1,a2,a3], [b1,b2] → [a1,b1, a2,b2, a3]
-
-    repeat=True: shorter lists cycle back to their first episode.
-      [a1,a2,a3], [b1,b2] → [a1,b1, a2,b2, a3,b1]
+    Interleave episodes from multiple lists in round-robin order.
+    
+    Parameters:
+        repeat (bool): Whether to cycle shorter lists until the longest list is exhausted.
+    
+    Returns:
+        list: The interleaved items.
     """
+    lists = [lst for lst in lists if lst]
     if not lists:
         return []
     if repeat:
@@ -201,14 +202,18 @@ def interleave(lists: list[list], repeat: bool = False) -> list:
 
 
 def interleave_in_blocks(lists: list[list], block_size: int, repeat: bool = False) -> list:
-    """Interleave shows in consecutive blocks of block_size episodes, keeping episode order.
-
-    Each round gives block_size consecutive episodes from each show in turn.
-    Episodes always play in their natural order — no randomisation.
-
-      [a1,a2,a3,a4,a5], [b1,b2,b3], block_size=2
-      → a1 a2  b1 b2  a3 a4  b3  a5
     """
+    Interleave episode lists in consecutive blocks while preserving each list's episode order.
+    
+    Parameters:
+        lists (list[list]): Episode lists to combine.
+        block_size (int): Number of consecutive episodes taken from each list per round.
+        repeat (bool): Whether to cycle shorter lists until they match the longest list.
+    
+    Returns:
+        list: Episodes arranged in block-interleaved order.
+    """
+    lists = [lst for lst in lists if lst]
     if not lists:
         return []
     if repeat:
@@ -232,13 +237,17 @@ def interleave_in_blocks(lists: list[list], block_size: int, repeat: bool = Fals
 def interleave_by_season(
     show_seasons: list[list[list[Path]]], repeat: bool = False
 ) -> list[Path]:
-    """Interleave shows season-by-season in broadcast order.
-
-    For each season round, all episodes of each show's current season are appended
-    in show order (no pooling, no randomisation), then the next season round begins.
-
-    show_seasons: list of shows; each show is a list of season-episode lists.
     """
+    Interleave episodes from multiple shows by corresponding seasons.
+    
+    Parameters:
+    	show_seasons (list[list[list[Path]]]): Season-ordered episode lists for each show.
+    	repeat (bool): Whether to reuse a show's seasons when it has fewer seasons than another show.
+    
+    Returns:
+    	list[Path]: Episodes arranged by season round and show order.
+    """
+    show_seasons = [s for s in show_seasons if s]
     if not show_seasons:
         return []
     max_seasons = max(len(s) for s in show_seasons)
@@ -730,6 +739,12 @@ def _groups_screen(
 
 def interactive_mode() -> None:
     # Initialize layout store and load previous active state (or last session state)
+    """
+    Run the interactive text interface for configuring and generating a TV playlist.
+    
+    Restores saved settings when available, maintains directory and show selections,
+    and provides menu-driven controls for playlist generation.
+    """
     store = LayoutStore()
 
     dirs: list[Path] = []
@@ -745,6 +760,8 @@ def interactive_mode() -> None:
 
     # Try loading active state or first available layout state
     state = store.get_active_state()
+    if not state and "Last Session State" in store.layouts:
+        state = store.layouts["Last Session State"]
     if not state and store.layouts:
         state = next(iter(store.layouts.values()))
 
@@ -1105,7 +1122,10 @@ class InterleaverGUI:
         self._loading_state = was_loading
 
     def load_active_layout_state(self):
+        """Load the active layout state and apply it to the interface, falling back to the last session state when no active layout is available."""
         state = self.store.get_active_state()
+        if not state and "Last Session State" in self.store.layouts:
+            state = self.store.layouts["Last Session State"]
         if state:
             self.apply_state_dict(state)
             self._update_window_title()

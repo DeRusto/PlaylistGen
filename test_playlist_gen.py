@@ -937,3 +937,74 @@ def test_gui_state_apply_and_extract(tmp_path, monkeypatch):
         assert saved_state["groups"] == [["BreakingBad"]]
     finally:
         root.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Additional edge case tests (empty lists, repeat mode, GUI session recovery)
+# ---------------------------------------------------------------------------
+
+def test_interleave_with_empty_sublist_repeat():
+    """Test that interleave handles empty sub-lists without getting stuck or truncating."""
+    a = ["a1", "a2"]
+    b = []
+    # repeat=True with empty lists shouldn't crash or result in an empty list
+    assert interleave([a, b], repeat=True) == ["a1", "a2"]
+
+
+def test_interleave_in_blocks_with_empty_sublist_repeat():
+    """Test that interleave_in_blocks handles empty sub-lists under repeat=True."""
+    a = ["a1", "a2", "a3"]
+    b = []
+    # repeat=True with empty list should successfully process non-empty lists
+    assert interleave_in_blocks([a, b], block_size=2, repeat=True) == ["a1", "a2", "a3"]
+
+
+def test_interleave_by_season_with_empty_sublist_repeat():
+    """Test that interleave_by_season handles empty season sub-lists under repeat=True."""
+    sa = [[Path("a01.mkv")]]
+    sb = []
+    assert interleave_by_season([sa, sb], repeat=True) == [Path("a01.mkv")]
+
+
+def test_gui_last_session_state_autosave_load(tmp_path, monkeypatch):
+    """Test that GUI consistently recovers 'Last Session State' if no active layout is set."""
+    import tkinter as tk
+    import playlist_gen
+    from playlist_gen import InterleaverGUI, LayoutStore
+
+    # Apply monkeypatch for LAYOUT_FILE override
+    layout_file = tmp_path / "gui_last_session_layouts.json"
+    monkeypatch.setattr(playlist_gen, "LAYOUT_FILE", layout_file)
+
+    # Pre-save last session state
+    store = LayoutStore(filename=layout_file)
+    test_state = {
+        "dirs": [],
+        "selected": [],
+        "groups": [],
+        "output_path": "/tmp/recovered_session.m3u",
+        "relative": True,
+        "repeat": True,
+        "show_order": "random",
+        "interleave_mode": "seasons",
+        "block_size": "12"
+    }
+    store.autosave_session(test_state)
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tkinter Tk cannot be initialized in headless environment")
+
+    try:
+        app = InterleaverGUI(root)
+        # Ensure that active layout name is None initially, meaning we recover from Last Session State
+        assert app.store.active_layout_name is None
+        assert app.output_path_var.get() == "/tmp/recovered_session.m3u"
+        assert app.relative_var.get() is True
+        assert app.repeat_var.get() is True
+        assert app.show_order_var.get() == "random"
+        assert app.interleave_mode_var.get() == "seasons"
+        assert app.block_size_var.get() == "12"
+    finally:
+        root.destroy()
