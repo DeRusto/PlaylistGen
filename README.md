@@ -251,3 +251,7 @@ If you are running in a headless Linux environment, use `xvfb-run` to emulate a 
 ```bash
 xvfb-run python3 -m pytest test_playlist_gen.py -v
 ```
+
+## License
+
+PlaylistGen is free software, licensed under the [GNU Affero General Public License v3](LICENSE) — Copyright © 2026 Brandon Douglas Winterton.
